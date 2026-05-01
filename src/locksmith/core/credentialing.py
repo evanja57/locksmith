@@ -411,6 +411,8 @@ class IssueCredentialDoer(doing.DoDoer):
 
             while not credentialer.complete(said=creder.said):
                 self.rgy.processEscrows()
+                verifier.processEscrows()
+                credentialer.processEscrows()
                 yield self.tock
 
             logger.info(f"Credential issued successfully: {creder.said}")
