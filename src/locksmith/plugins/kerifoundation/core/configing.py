@@ -9,10 +9,52 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
 from keri import help
 
 logger = help.ogler.getLogger(__name__)
+
+DEFAULT_DEV_ONBOARDING_URL = "http://127.0.0.1:9723/onboarding"
+DEFAULT_DEV_ACCOUNT_URL = "http://127.0.0.1:9723/account"
+DEFAULT_STAGING_ONBOARDING_URL = ""
+DEFAULT_STAGING_ACCOUNT_URL = ""
+DEFAULT_PROD_ONBOARDING_URL = ""
+DEFAULT_PROD_ACCOUNT_URL = ""
+
+
+@dataclass(frozen=True)
+class KFSurfaceConfig:
+    """Remote public surfaces for the KF boot contract."""
+
+    onboarding_url: str
+    account_url: str
+    onboarding_destination: str = ""
+    account_destination: str = ""
+
+    @property
+    def bootstrap_url(self) -> str:
+        return urljoin(self.onboarding_url, "/bootstrap/config")
+
+    @property
+    def health_url(self) -> str:
+        return urljoin(self.onboarding_url, "/health")
+
+
+KF_SURFACES_BY_ENV = {
+    "development": KFSurfaceConfig(
+        onboarding_url=DEFAULT_DEV_ONBOARDING_URL,
+        account_url=DEFAULT_DEV_ACCOUNT_URL,
+    ),
+    "staging": KFSurfaceConfig(
+        onboarding_url=DEFAULT_STAGING_ONBOARDING_URL,
+        account_url=DEFAULT_STAGING_ACCOUNT_URL,
+    ),
+    "production": KFSurfaceConfig(
+        onboarding_url=DEFAULT_PROD_ONBOARDING_URL,
+        account_url=DEFAULT_PROD_ACCOUNT_URL,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -110,3 +152,14 @@ def load_witness_servers(app: Any) -> list[WitnessServerConfig]:
             boot_url=legacy_boot_url,
         )
     ]
+
+
+def load_kf_surfaces(app: Any) -> KFSurfaceConfig:
+    """Load KF onboarding/account surface routes for the active environment."""
+    environment = getattr(getattr(app, "config", None), "environment", None)
+    env_name = getattr(environment, "value", str(environment or "")).lower()
+
+    try:
+        return KF_SURFACES_BY_ENV[env_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown environment: {env_name}")

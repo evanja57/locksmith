@@ -80,12 +80,16 @@ not the long-term plugin contract.
 Boot Surface Configuration
 --------------------------
 
-The Step 4/5/6 onboarding flow reads the public boot surfaces from:
+The Step 4/5/6 onboarding flow reads the public boot surfaces from plugin-local
+defaults in `locksmith.plugins.kerifoundation.core.configing`.
 
-- `KF_DEV_ONBOARDING_URL` / `KF_PROD_ONBOARDING_URL`
-- `KF_DEV_ACCOUNT_URL` / `KF_PROD_ACCOUNT_URL`
-- optional `KF_DEV_ONBOARDING_DESTINATION` / `KF_PROD_ONBOARDING_DESTINATION`
-- optional `KF_DEV_ACCOUNT_DESTINATION` / `KF_PROD_ACCOUNT_DESTINATION`
+Development is hardcoded to the local `kf-boot` stack at
+`http://127.0.0.1:9723/onboarding` and `http://127.0.0.1:9723/account`.
+Staging and production routes intentionally default to blank until the real
+hosted URLs are available.
+
+Temporary local-stack variants should be added as explicit configing values,
+not `.env`-driven runtime overrides.
 
 `/bootstrap/config` remains plain HTTPS+JSON. Authenticated onboarding and
 approved-account requests are posted as CESR-over-HTTP with KRAM-authenticated
