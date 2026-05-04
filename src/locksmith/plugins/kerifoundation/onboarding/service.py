@@ -6,7 +6,6 @@ KF onboarding orchestration and boot-backed account transport helpers.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urljoin
@@ -34,6 +33,10 @@ from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_PENDING_ONBOARDING,
     KFAccountRecord,
 )
+from locksmith.plugins.kerifoundation.core.configing import (
+    KFSurfaceConfig,
+    load_kf_surfaces,
+)
 from locksmith.plugins.kerifoundation.witnesses.provision import (
     HostedWitnessAllocation,
     HostedWitnessRegistrar,
@@ -47,24 +50,6 @@ logger = help.ogler.getLogger(__name__)
 ProgressFn = Callable[..., None] | None
 ONBOARDING_AUTH_NAMESPACE = "kf_onboarding"
 ONBOARDING_AUTH_ALIAS_PREFIX = "kf-onboarding"
-
-
-@dataclass(frozen=True)
-class KFSurfaceConfig:
-    """Remote public surfaces for the KF boot contract."""
-
-    onboarding_url: str
-    account_url: str
-    onboarding_destination: str = ""
-    account_destination: str = ""
-
-    @property
-    def bootstrap_url(self) -> str:
-        return urljoin(self.onboarding_url, "/bootstrap/config")
-
-    @property
-    def health_url(self) -> str:
-        return urljoin(self.onboarding_url, "/health")
 
 
 @dataclass(frozen=True)
@@ -1618,22 +1603,6 @@ class KFVaultDeletionService:
             destination=record.boot_server_aid,
         )
 
-
-def load_kf_surfaces(app: Any) -> KFSurfaceConfig:
-    environment = getattr(getattr(app, "config", None), "environment", None)
-    env_name = getattr(environment, "value", str(environment or "")).lower()
-    prefix = "KF_DEV" if env_name == "development" else "KF_PROD"
-
-    onboarding_url = os.environ.get(f"{prefix}_ONBOARDING_URL", "").strip()
-    account_url = os.environ.get(f"{prefix}_ACCOUNT_URL", "").strip()
-    onboarding_destination = os.environ.get(f"{prefix}_ONBOARDING_DESTINATION", "").strip()
-    account_destination = os.environ.get(f"{prefix}_ACCOUNT_DESTINATION", "").strip()
-    return KFSurfaceConfig(
-        onboarding_url=onboarding_url,
-        account_url=account_url,
-        onboarding_destination=onboarding_destination,
-        account_destination=account_destination,
-    )
 
 def split_cesr_message(ims: bytearray | bytes) -> tuple[bytes, bytes]:
     """Split a CESR message into body and attachment bytes."""

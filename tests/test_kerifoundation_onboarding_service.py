@@ -965,20 +965,31 @@ def test_onboarding_rejects_allocations_that_do_not_match_requested_profile(tmp_
         db.close()
 
 
-def test_load_kf_surfaces_requires_explicit_account_surface(monkeypatch):
+def test_load_kf_surfaces_uses_local_dev_defaults(monkeypatch):
     app = SimpleNamespace(
         config=SimpleNamespace(environment=SimpleNamespace(value="development"))
     )
 
-    monkeypatch.setenv("KF_DEV_ONBOARDING_URL", "https://onboarding.example")
+    monkeypatch.delenv("KF_DEV_ONBOARDING_URL", raising=False)
     monkeypatch.delenv("KF_DEV_ACCOUNT_URL", raising=False)
     monkeypatch.delenv("KF_DEV_ONBOARDING_DESTINATION", raising=False)
     monkeypatch.delenv("KF_DEV_ACCOUNT_DESTINATION", raising=False)
 
     surfaces = load_kf_surfaces(app)
 
-    assert surfaces.onboarding_url == "https://onboarding.example"
-    assert surfaces.account_url == ""
+    assert surfaces.onboarding_url == "http://127.0.0.1:9723/onboarding"
+    assert surfaces.account_url == "http://127.0.0.1:9723/account"
+    assert surfaces.bootstrap_url == "http://127.0.0.1:9723/bootstrap/config"
+    assert surfaces.health_url == "http://127.0.0.1:9723/health"
+
+
+def test_load_kf_surfaces_rejects_unknown_environment():
+    app = SimpleNamespace(
+        config=SimpleNamespace(environment=SimpleNamespace(value="preview"))
+    )
+
+    with pytest.raises(ValueError, match="Unknown environment: preview"):
+        load_kf_surfaces(app)
 
 
 def test_build_witness_auths_rejects_missing_auth_material(tmp_path):
