@@ -10,6 +10,7 @@ from keri import help
 from keri.core.serdering import SerderKERI
 from keri.core import parsing
 
+from locksmith.core.remoting import message_version
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -251,7 +252,7 @@ class AcceptDelegateDialog(LocksmithDialog):
 
             # Parse and process the delegate event through Kevery
             kvy = self.app.vault.kvy
-            parsing.Parser().parse(ims=self.delegate_raw, kvy=kvy)
+            parsing.Parser().parse(ims=self.delegate_raw, kvy=kvy, version=message_version(self.delegate_raw))
 
             # The event should now be in delegables, retrieve it
             delegate_prefix = self.delegate_serder.pre

@@ -328,7 +328,7 @@ class NotificationsButton(HoverIconButton):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
 
             message_count = 0
-            for _, note in self.app.vault.notifier.noter.notes.getItemIter():
+            for _, note in self.app.vault.notifier.noter.notes.getTopItemIter():
                 if not note.read:
                     message_count += 1
 

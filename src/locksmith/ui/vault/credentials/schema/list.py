@@ -95,7 +95,7 @@ class SchemaListPage(BaseListPage):
         """
         try:
             schema_data = []
-            for (said,), schemer in self.app.vault.hby.db.schema.getItemIter():
+            for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
                 sed = schemer.sed
 
                 # Determine issuer name

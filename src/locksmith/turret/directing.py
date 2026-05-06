@@ -8,7 +8,7 @@ import json
 from hio.base import doing
 from hio.help import decking
 
-from keri import help
+from keri import help, kering
 from keri.core import eventing, routing
 from keri.core import parsing
 from keri.vdr.eventing import Tevery
@@ -187,11 +187,14 @@ class Reactor(doing.DoDoer):
         else:
             self.tvy = None
 
+        # keripy v2 still emits KERI 1.0 attachment counters on streams.
+        # Keep this parser on v1 until keripy supports mixed versions per frame.
         self.parser = parsing.Parser(ims=self.client.rxbs,
                                      framed=True,
                                      kvy=self.kevery,
                                      tvy=self.tvy,
-                                     exc=self.exc)
+                                     exc=self.exc,
+                                     version=kering.Vrsn_1_0)
 
         super(Reactor, self).__init__(doers=doers, **kwa)
         if self.tymth:
@@ -538,12 +541,15 @@ class Reactant(doing.DoDoer):
 
         self.kevery.registerReplyRoutes(router=rvy.rtr)
 
+        # keripy v2 still emits KERI 1.0 attachment counters on streams.
+        # Keep this parser on v1 until keripy supports mixed versions per frame.
         self.parser = parsing.Parser(ims=self.remoter.rxbs,
                                      framed=True,
                                      kvy=self.kevery,
                                      tvy=self.tevery,
                                      exc=self.exchanger,
-                                     rvy=rvy)
+                                     rvy=rvy,
+                                     version=kering.Vrsn_1_0)
 
         super(Reactant, self).__init__(doers=doers, **kwa)
         if self.tymth:

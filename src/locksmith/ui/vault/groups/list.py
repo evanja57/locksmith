@@ -101,7 +101,7 @@ class GroupIdentifierListPage(BaseListPage):
 
         try:
             identifier_data = []
-            for identifier in self.app.vault.hby.db.names.getItemIter(keys=()):
+            for identifier in self.app.vault.hby.db.names.getTopItemIter(keys=()):
                 hab = self.app.vault.hby.habByName(identifier[0][1])
 
                 # Filter: Only show GroupHab instances (skip regular identifiers)

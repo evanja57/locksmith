@@ -8,7 +8,7 @@ from typing import Dict, Any, TYPE_CHECKING
 
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 from keri import help
-from keri.app import connecting
+from keri.app import organizing
 from keri.help import helping
 
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
@@ -101,7 +101,7 @@ class IssuedCredentialsListPage(BaseListPage):
         This method is called after a vault is opened and hby is available.
         """
         try:
-            org = connecting.Organizer(hby=self.app.vault.hby)
+            org = organizing.Organizer(hby=self.app.vault.hby)
 
             issued_credentials_data = []
             saids = list()

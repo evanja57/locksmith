@@ -103,15 +103,15 @@ class KFBaser(dbing.LMDBer):
     def reopen(self, **kwa):
         super(KFBaser, self).reopen(**kwa)
 
-        self.accounts = koming.Komer(db=self, subkey='acct.', schema=KFAccountRecord)
-        self.witnesses = koming.Komer(db=self, subkey='wit.', schema=WitnessRecord)
-        self.witBatches = koming.Komer(db=self, subkey='witb.', schema=WitnessBatches)
+        self.accounts = koming.Komer(db=self, subkey='acct.', klas=KFAccountRecord)
+        self.witnesses = koming.Komer(db=self, subkey='wit.', klas=WitnessRecord)
+        self.witBatches = koming.Komer(db=self, subkey='witb.', klas=WitnessBatches)
         self.provisionedWitnesses = koming.Komer(
-            db=self, subkey='pwit.', schema=ProvisionedWitnessRecord
+            db=self, subkey='pwit.', klas=ProvisionedWitnessRecord
         )
-        self.watchers = koming.Komer(db=self, subkey='wat.', schema=WatcherRecord)
+        self.watchers = koming.Komer(db=self, subkey='wat.', klas=WatcherRecord)
         self.attachedIdentifiers = koming.Komer(
-            db=self, subkey='idn.', schema=AttachedIdentifierRecord
+            db=self, subkey='idn.', klas=AttachedIdentifierRecord
         )
 
         return self.env
@@ -135,7 +135,7 @@ class KFBaser(dbing.LMDBer):
         return record, True
 
     def list_attached_identifier_prefixes(self) -> list[str]:
-        return [prefix for (prefix,), _ in self.attachedIdentifiers.getItemIter(keys=())]
+        return [prefix for (prefix,), _ in self.attachedIdentifiers.getTopItemIter(keys=())]
 
     def is_identifier_attached(self, prefix: str) -> bool:
         return self.attachedIdentifiers.get(keys=(prefix,)) is not None

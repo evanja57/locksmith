@@ -4,6 +4,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from keri import kering
 
 from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_FAILED,
@@ -1176,6 +1177,10 @@ def test_parse_cesr_http_reply_rejects_non_reply_messages(monkeypatch):
         FakeParser,
     )
     monkeypatch.setattr(
+        "locksmith.plugins.kerifoundation.onboarding.service.message_version",
+        lambda ims: kering.Vrsn_1_0,
+    )
+    monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.onboarding.service.split_cesr_stream",
         lambda ims: [fake_serder],
     )
@@ -1222,6 +1227,10 @@ def test_parse_cesr_http_reply_rejects_sender_mismatch(monkeypatch):
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.onboarding.service.parsing.Parser",
         FakeParser,
+    )
+    monkeypatch.setattr(
+        "locksmith.plugins.kerifoundation.onboarding.service.message_version",
+        lambda ims: kering.Vrsn_1_0,
     )
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.onboarding.service.split_cesr_stream",

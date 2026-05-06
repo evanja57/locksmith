@@ -178,7 +178,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         try:
             # Get all schemas from the database
-            for (said,), schemer in self.app.vault.hby.db.schema.getItemIter():
+            for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
                 logger.info(f"Found schema {said} checking with {self.app.vault.rgy.regs}")
                 if not self.app.vault.rgy.registryByName(said):
                     continue
@@ -493,7 +493,7 @@ class IssueCredentialDialog(LocksmithDialog):
             credentials = []
 
             # Query credentials by schema SAID
-            for (_,), saider in reger.schms.getItemIter(keys=(schema_said,)):
+            for (_,), saider in reger.schms.getTopItemIter(keys=(schema_said,)):
                 credential = reger.creds.get(keys=(saider.qb64,))
 
                 if not credential:

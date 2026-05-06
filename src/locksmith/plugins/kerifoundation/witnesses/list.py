@@ -88,7 +88,7 @@ class WitnessOverviewPage(QWidget):
         hby = self._app.vault.hby
         org = self._app.vault.org
 
-        for (hab_pre, eid), record in self._db.witnesses.getItemIter(keys=()):
+        for (hab_pre, eid), record in self._db.witnesses.getTopItemIter(keys=()):
             if hab_pre != account_aid and hab_pre not in attached_prefixes:
                 continue
 

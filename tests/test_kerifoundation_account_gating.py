@@ -22,7 +22,7 @@ from locksmith.plugins.kerifoundation.plugin import KeriFoundationPlugin
 class FakeHby:
     def __init__(self, name="test-vault"):
         self.name = name
-        self.db = SimpleNamespace(names=SimpleNamespace(getItemIter=lambda keys=(): iter(())))
+        self.db = SimpleNamespace(names=SimpleNamespace(getTopItemIter=lambda keys=(): iter(())))
 
     def habByName(self, alias):
         return None
@@ -39,7 +39,7 @@ class FakeVault:
 class FakeApp:
     def __init__(self, vault_name="test-vault"):
         self.vault = FakeVault(name=vault_name)
-        self.config = SimpleNamespace(environment=None)
+        self.config = SimpleNamespace(environment=SimpleNamespace(value="development"))
 
 
 def test_kf_account_record_survives_reload(tmp_path):

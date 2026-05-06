@@ -1139,7 +1139,7 @@ class WitnessProvisionPage(LocksmithFormPage):
             hby = self._app.vault.hby
             if hby and getattr(hby, "db", None):
                 try:
-                    for (ns, alias), prefix in hby.db.names.getItemIter(keys=()):
+                    for (ns, alias), prefix in hby.db.names.getTopItemIter(keys=()):
                         if ns == "" and prefix == hab.pre:
                             return alias
                 except Exception:
@@ -1170,7 +1170,7 @@ class WitnessProvisionPage(LocksmithFormPage):
             return registered_urls, pending_boot_urls
 
         try:
-            for _, record in self._db.witnesses.getItemIter(keys=(self._hab_pre,)):
+            for _, record in self._db.witnesses.getTopItemIter(keys=(self._hab_pre,)):
                 registered_url = self._normalize_url(record.url)
                 if not registered_url and record.oobi:
                     registered_url = self._extract_base_url(record.oobi)
@@ -1180,7 +1180,7 @@ class WitnessProvisionPage(LocksmithFormPage):
             logger.warning("Failed loading registered witness state", exc_info=True)
 
         try:
-            for _, record in self._db.provisionedWitnesses.getItemIter(keys=(self._hab_pre,)):
+            for _, record in self._db.provisionedWitnesses.getTopItemIter(keys=(self._hab_pre,)):
                 boot_url = self._normalize_url(record.boot_url)
                 if boot_url:
                     pending_boot_urls.add(boot_url)

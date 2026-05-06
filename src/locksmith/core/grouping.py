@@ -10,7 +10,7 @@ from hio.base import doing
 from keri import help, kering
 from keri.app import grouping as keri_grouping
 from keri.app import habbing as keri_habbing
-from keri.app import connecting
+from keri.app import organizing
 from keri.core import coring
 from keri.core.serdering import SerderKERI
 from keri.peer import exchanging
@@ -32,7 +32,7 @@ def get_contacts_for_multisig(app):
     Returns:
         list: List of dicts with 'id', 'alias' keys for eligible contacts
     """
-    org = connecting.Organizer(hby=app.vault.hby)
+    org = organizing.Organizer(hby=app.vault.hby)
     contacts = org.list()
     kevers = app.vault.hby.kevers
 
@@ -157,7 +157,7 @@ def get_pending_multisig_rotation_proposals(app):
         list: List of proposal dicts with rid, said, exn, datetime keys
     """
     proposals = []
-    for (dt, rid), note in app.vault.notifier.noter.notes.getItemIter():
+    for (dt, rid), note in app.vault.notifier.noter.notes.getTopItemIter():
         route = note.pad.get('a', {}).get('r', '')
         if '/multisig/rot' in route and not note.read:
             said = note.attrs.get('d', '')
@@ -932,7 +932,7 @@ def get_pending_multisig_proposals(app):
         list: List of proposal dicts with rid, said, exn, datetime keys
     """
     proposals = []
-    for (dt, rid), note in app.vault.notifier.noter.notes.getItemIter():
+    for (dt, rid), note in app.vault.notifier.noter.notes.getTopItemIter():
         route = note.pad.get('a', {}).get('r', '')
         if '/multisig/icp' in route and not note.read:
             said = note.attrs.get('d', '')

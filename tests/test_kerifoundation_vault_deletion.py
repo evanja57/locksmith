@@ -20,7 +20,7 @@ class FakeHby:
         self.name = name
         self._habs_by_pre = habs_by_pre or {}
         self._habs_by_name = habs_by_name or {}
-        self.db = SimpleNamespace(names=SimpleNamespace(getItemIter=lambda keys=(): iter(())))
+        self.db = SimpleNamespace(names=SimpleNamespace(getTopItemIter=lambda keys=(): iter(())))
 
     def habByPre(self, pre):
         return self._habs_by_pre.get(pre)
@@ -43,7 +43,7 @@ class FakeVault:
 class FakeApp:
     def __init__(self, hby):
         self.vault = FakeVault(hby)
-        self.config = SimpleNamespace(environment=None)
+        self.config = SimpleNamespace(environment=SimpleNamespace(value="development"))
 
 
 class FakeBootClient:

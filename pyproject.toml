@@ -10,7 +10,7 @@ name = "Locksmith"
 version = "0.0.1"
 description = "Locksmith – KERI identity vault application"
 readme = "README.md"
-requires-python = ">=3.12.6"
+requires-python = ">=3.14.0"
 license = { text = "MIT" }
 
 authors = [
@@ -22,28 +22,28 @@ authors = [
 keywords = ["KERI Foundation", "cryptography", "KERI", "ACDC"]
 
 classifiers = [
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 
 dependencies = [
-    "PySide6==6.9.2",
+    "PySide6==6.10.3",
     "qasync>=0.28.0",
-    "keri==1.3.4",
+    "keri @ git+https://github.com/WebOfTrust/keripy.git",
     "qtawesome>=1.4.0",
     "mnemonic==0.21",
     "multicommand==1.0.0",
     "pillow==11.0.0",
-    "qrcode[pil]==7.4.2",
+    "qrcode[pil]==8.2",
     "pyotp==2.9.0",
     "prometheus_client>=0.21.1",
     "schedule==1.2.2",
     "kerkle>=0.0.3",
     "cbor>=1.0.0",
-    "falcon==4.0.2",
+    "falcon==4.2.0",
     "requests==2.32.3",
-    'cryptography>=44.0.0',
+    'cryptography>=46.0.3',
     'pymongo>=4.11.2',
 ]
 

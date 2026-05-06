@@ -24,7 +24,7 @@ def iter_local_identifier_choices(app: Any):
     if not hby or not getattr(hby, "db", None):
         return
 
-    for (ns, alias), prefix in hby.db.names.getItemIter(keys=()):
+    for (ns, alias), prefix in hby.db.names.getTopItemIter(keys=()):
         if ns != "":
             continue
 

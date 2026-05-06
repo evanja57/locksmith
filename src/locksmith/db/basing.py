@@ -33,7 +33,7 @@ class OTPSecrets(dbing.LMDBer):
         """
         super(OTPSecrets, self).reopen(**kwa)
 
-        self.otpSecrets = koming.Komer(db=self, subkey='otpSecrets.', schema=OTPSecret, )
+        self.otpSecrets = koming.Komer(db=self, subkey='otpSecrets.', klas=OTPSecret)
 
         return self.env
 
@@ -100,16 +100,16 @@ class LocksmithBaser(dbing.LMDBer):
         super(LocksmithBaser, self).reopen(**kwa)
 
         # Identifier metadata storage
-        self.idm = koming.Komer(db=self, subkey='.idm', schema=IdentifierMetaInfo)
+        self.idm = koming.Komer(db=self, subkey='.idm', klas=IdentifierMetaInfo)
 
         # Mailbox listening storage
-        self.mbx = koming.Komer(db=self, subkey='mbx.', schema=MailboxListener)
+        self.mbx = koming.Komer(db=self, subkey='mbx.', klas=MailboxListener)
 
         # Browser plugin settings storage
         self.pluginSettings = koming.Komer(
             db=self,
             subkey='pluginSettings.',
-            schema=BrowserPluginSettings
+            klas=BrowserPluginSettings
         )
 
         return self.env

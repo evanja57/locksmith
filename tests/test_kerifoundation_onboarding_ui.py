@@ -77,7 +77,7 @@ class FakeNames:
     def __init__(self, items):
         self._items = items
 
-    def getItemIter(self, keys=()):
+    def getTopItemIter(self, keys=()):
         return iter(self._items)
 
 
@@ -519,7 +519,7 @@ class TestOnboardingGatingIntegration:
         class FakeHby:
             def __init__(self):
                 self.name = "gating-test"
-                self.db = SimpleNamespace(names=SimpleNamespace(getItemIter=lambda keys=(): iter(())))
+                self.db = SimpleNamespace(names=SimpleNamespace(getTopItemIter=lambda keys=(): iter(())))
 
             def habByName(self, alias):
                 return None
@@ -528,7 +528,9 @@ class TestOnboardingGatingIntegration:
             def __init__(self):
                 self.hby = FakeHby()
 
-        app = SimpleNamespace(config=SimpleNamespace(environment=None))
+        app = SimpleNamespace(
+            config=SimpleNamespace(environment=SimpleNamespace(value="development"))
+        )
         vault = FakeVault()
         plugin = KeriFoundationPlugin()
         plugin.initialize(app)

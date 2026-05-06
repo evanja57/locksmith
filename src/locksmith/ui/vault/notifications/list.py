@@ -11,7 +11,7 @@ from typing import Any, TYPE_CHECKING
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from keri import help
-from keri.app import connecting
+from keri.app import organizing
 from keri.core import scheming
 from keri.peer import exchanging
 from keri.vc.protocoling import Ipex
@@ -129,7 +129,7 @@ class NotificationsListPage(QWidget):
 
         try:
             # Iterate through notifications from notifier
-            for (dt, rid), note in self.app.vault.notifier.noter.notes.getItemIter():
+            for (dt, rid), note in self.app.vault.notifier.noter.notes.getTopItemIter():
                 # Format timestamp
                 from keri.help import helping
                 try:
@@ -266,7 +266,7 @@ class NotificationsListPage(QWidget):
             return self._format_generic_notification(note, rid, timestamp_display)
 
         try:
-            org = connecting.Organizer(hby=self.app.vault.hby)
+            org = organizing.Organizer(hby=self.app.vault.hby)
             signer_contact = org.get(signer)
             if signer_contact is None:
                 signer_name = "Unknown"
@@ -313,7 +313,7 @@ class NotificationsListPage(QWidget):
         dig = note.pad.get('a', {}).get('dig', '')
 
         try:
-            org = connecting.Organizer(hby=self.app.vault.hby)
+            org = organizing.Organizer(hby=self.app.vault.hby)
             signer_contact = org.get(pre)
             if signer_contact is None:
                 signer_name = "Unknown"

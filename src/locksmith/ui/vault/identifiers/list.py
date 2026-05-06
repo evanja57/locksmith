@@ -100,7 +100,7 @@ class IdentifierListPage(BaseListPage):
         """
         try:
             identifier_data = []
-            for (ns, alias), prefix in self.app.vault.hby.db.names.getItemIter(keys=()):
+            for (ns, alias), prefix in self.app.vault.hby.db.names.getTopItemIter(keys=()):
                 if ns != "":
                     continue
 

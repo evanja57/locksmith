@@ -13,6 +13,8 @@ from keri.app.agenting import httpClient
 from keri.app.httping import Clienter, streamCESRRequests
 from keri.core import eventing, routing, parsing
 
+from locksmith.core.remoting import message_version
+
 logger = help.ogler.getLogger(__name__)
 
 
@@ -46,7 +48,7 @@ class Rorschach(doing.Doer):
         
     def recur(self, tyme, deeds=None):
         watched = dict()
-        for (cid, wid, oid), obr in self.hby.db.obvs.getItemIter():
+        for (cid, wid, oid), obr in self.hby.db.obvs.getTopItemIter():
             if (cid, oid) not in watched:
                 watched[(cid, oid)] = list()
             watched[(cid, oid)].append(wid)
@@ -194,7 +196,8 @@ class WatcherInquisitor(doing.DoDoer):
         rvy = routing.Revery(db=self.hby.db, rtr=rtr)
         kvy = eventing.Kevery(db=hby.db, lax=True, rvy=rvy)
         kvy.registerReplyRoutes(router=rtr)
-        self.psr = parsing.Parser(framed=True, kvy=kvy, rvy=rvy, local=True)
+        self.kvy = kvy
+        self.rvy = rvy
         self.msgs = msgs if msgs is not None else decking.Deck()
         self.cues = cues if cues is not None else decking.Deck()
         self.clienter = Clienter()
@@ -239,7 +242,13 @@ class WatcherInquisitor(doing.DoDoer):
         rep = client.respond()
         if rep.status == 200:
             rpy = bytearray(rep.body)
-            self.psr.parse(bytearray(rpy))
+            parsing.Parser(
+                framed=True,
+                kvy=self.kvy,
+                rvy=self.rvy,
+                local=True,
+                version=message_version(rpy),
+            ).parse(bytearray(rpy))
 
         else:
             logger.info(f"invalid response {rep.status} from witnesses {wat}")

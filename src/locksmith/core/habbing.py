@@ -192,7 +192,7 @@ def load_potential_delegators(app, delegation_type='local'):
     Returns:
         list: List of dicts with 'id', 'alias' keys for potential delegators
     """
-    from keri.app import connecting
+    from keri.app import organizing
 
     delegators = []
 
@@ -205,7 +205,7 @@ def load_potential_delegators(app, delegation_type='local'):
             })
     else:  # remote
         # Load remote identifiers that can be delegators
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
         remote_ids = org.list()
         kevers = app.vault.hby.kevers
 
@@ -281,7 +281,7 @@ def list_eligible_local_identifiers(app):
     logger.info("Loading eligible local identifiers")
 
     hby = app.vault.hby
-    for (ns, alias), prefix in hby.db.names.getItemIter(keys=()):
+    for (ns, alias), prefix in hby.db.names.getTopItemIter(keys=()):
         if ns != "":
             continue
 
@@ -558,7 +558,7 @@ def delete_identifier(app, alias):
 
             # 4. Completed Group Multisig markers (if any partial completion exists)
             #    This is keyed by (pre, seqner.qb64), so you may need to iterate:
-            for keys, saider in app.vault.hby.db.cgms.getItemIter(keys=(pre,)):
+            for keys, saider in app.vault.hby.db.cgms.getTopItemIter(keys=(pre,)):
                 app.vault.hby.db.cgms.rem(keys=keys)
 
             try:
@@ -996,7 +996,7 @@ def refresh_keystate(app, hab):
         dict: Result with 'success' bool and 'message' str
     """
     from keri.app import habbing as keri_habbing
-    from keri.app import connecting
+    from keri.app import organizing
 
     try:
         if not isinstance(hab, keri_habbing.GroupHab):
@@ -1005,7 +1005,7 @@ def refresh_keystate(app, hab):
                 'message': 'Identifier is not a group multisig'
             }
 
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
 
         # Query key state for each member
         for pre in hab.smids:

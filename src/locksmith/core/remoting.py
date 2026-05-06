@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     pass
 
 from hio.base import doing
-from keri import help
-from keri.app import connecting, forwarding
+from keri import help, kering
+from keri.app import organizing, forwarding
 from keri.app.habbing import GroupHab
 from keri.core import parsing, serdering
 from keri.core.serdering import SerderKERI
@@ -26,6 +26,14 @@ from keri.peer import exchanging
 from mnemonic import Mnemonic
 
 logger = help.ogler.getLogger(__name__)
+
+
+def message_version(ims: bytes | bytearray) -> kering.Versionage:
+    """Return the KERI wire version for a complete raw message."""
+    if kering.sniff(ims) == kering.Colds.msg:
+        return kering.smell(ims).pvrsn
+
+    return kering.Vrsn_2_0
 
 
 def upsert_remote_id_metadata(app, pre: str, *, alias=None, cid=None, tag=None, oobi=None):
@@ -66,7 +74,7 @@ def get_remote_id_details(app, remote_id_pre: str) -> dict:
     kever = hby.kevers.get(remote_id_pre)
 
     # Get organizer data for alias and metadata
-    org = connecting.Organizer(hby=hby)
+    org = organizing.Organizer(hby=hby)
     remote_data = org.get(remote_id_pre) or {}
 
     # Extract alias
@@ -93,7 +101,7 @@ def get_remote_id_details(app, remote_id_pre: str) -> dict:
     # Extract existing role assignments from ends database
     existing_roles = []
     mailboxes = []
-    for (cid, role, eid), end in hby.db.ends.getItemIter():
+    for (cid, role, eid), end in hby.db.ends.getTopItemIter():
         if eid == remote_id_pre and end.allowed:
             existing_roles.append((cid, role, eid))
         if cid == remote_id_pre and role == 'mailbox':
@@ -714,7 +722,12 @@ class ImportDoer(doing.DoDoer):
             with open(self.file, 'rb') as f:
                 ims = f.read()
 
-                parsing.Parser(kvy=self.hby.kvy, rvy=self.hby.rvy, local=False).parse(ims)
+                parsing.Parser(
+                    kvy=self.hby.kvy,
+                    rvy=self.hby.rvy,
+                    local=False,
+                    version=message_version(ims),
+                ).parse(ims)
                 self.hby.kvy.processEscrows()
 
                 serder = SerderKERI(raw=ims)
@@ -791,7 +804,7 @@ def refresh_keystate(app, remote_id_pre: str, oobi: str = None):
     """
     # Get current remote ID data to extract OOBI if not provided
     if not oobi:
-        org = connecting.Organizer(hby=app.vault.hby)
+        org = organizing.Organizer(hby=app.vault.hby)
         remote_data = org.get(remote_id_pre) or {}
         oobi = remote_data.get('oobi')
 
@@ -800,7 +813,7 @@ def refresh_keystate(app, remote_id_pre: str, oobi: str = None):
         return None
 
     # Get alias for logging
-    org = connecting.Organizer(hby=app.vault.hby)
+    org = organizing.Organizer(hby=app.vault.hby)
     remote_data = org.get(remote_id_pre) or {}
     alias = remote_data.get('alias', remote_id_pre)
 

@@ -6,13 +6,15 @@ Dialog for granting (sending or saving) issued credentials.
 """
 from hio.base import doing
 from keri import help
-from keri.app import signing, connecting, grouping, forwarding, habbing, agenting
+from keri.app import organizing, signing, grouping, forwarding, habbing, agenting
 from keri.app.notifying import Notifier
 from keri.core import serdering, coring, parsing, eventing
 from keri.help import helping
 from keri.peer import exchanging
 from keri.vc import protocoling
 from keri.vdr import eventing as teventing, verifying, credentialing
+
+from locksmith.core.remoting import message_version
 
 logger = help.ogler.getLogger(__name__)
 
@@ -62,7 +64,7 @@ class Granter:
         """
         timestamp = timestamp or helping.nowIso8601()
 
-        org = connecting.Organizer(hby=self.hby)
+        org = organizing.Organizer(hby=self.hby)
         creder, prefixer, seqner, saider = self.rgy.reger.cloneCred(said=said)
         if creder is None:
             raise ValueError(f"invalid credential SAID to grant={said}")
@@ -97,7 +99,7 @@ class Granter:
         msg = bytearray(exn.raw)
         msg.extend(atc)
     
-        parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc)
+        parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc, version=message_version(msg))
 
         return msg
 
@@ -129,8 +131,6 @@ class Admitter:
         self.tvy = tvy if tvy is not None else teventing.Tevery(db=self.hby.db, reger=self.rgy.reger)
         self.vry = vry if vry is not None else verifying.Verifier(hby=self.hby, reger=self.rgy.reger)
 
-        self.psr = parsing.Parser(kvy=self.kvy, tvy=self.tvy, vry=self.vry)
-
         # Use provided exchanger or create new one
         if exc is not None:
             self.exc = exc
@@ -145,7 +145,7 @@ class Admitter:
 
 
     def parse(self, ims):
-        parsing.Parser().parseOne(ims=bytes(ims), exc=self.exc)
+        parsing.Parser().parseOne(ims=bytes(ims), exc=self.exc, version=message_version(ims))
 
     def admit(self, said, message="", timestamp=None):
         """
@@ -172,7 +172,12 @@ class Admitter:
             ked = embeds[label]
             sadder = coring.Sadder(ked=ked)
             ims = bytearray(sadder.raw) + pathed[label]
-            self.psr.parseOne(ims=ims)
+            parsing.Parser(
+                kvy=self.kvy,
+                tvy=self.tvy,
+                vry=self.vry,
+                version=message_version(ims),
+            ).parseOne(ims=ims)
 
         credential_said = acdc["d"]
         if not self.rgy.reger.saved.get(keys=credential_said):
@@ -183,7 +188,7 @@ class Admitter:
         msg = bytearray(exn.raw)
         msg.extend(atc)
 
-        parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc)
+        parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc, version=message_version(msg))
 
         return admin_said, msg
 
@@ -279,7 +284,7 @@ class SendGrantDoer(doing.DoDoer):
                 return
 
             # Validate recipient exists
-            org = connecting.Organizer(hby=self.hby)
+            org = organizing.Organizer(hby=self.hby)
             recp = self.recipient_pre
 
             if recp not in self.hby.kevers:
@@ -338,7 +343,7 @@ class SendGrantDoer(doing.DoDoer):
             msg.extend(atc)
 
             # Parse locally using vault's existing exchanger (already has handlers loaded)
-            parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc)
+            parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc, version=message_version(msg))
 
             sender = hab
 
@@ -511,8 +516,6 @@ class AdmitDoer(doing.DoDoer):
         self.tvy = app.vault.tvy if hasattr(app.vault, 'tvy') else teventing.Tevery(db=self.hby.db, reger=self.rgy.reger)
         self.vry = app.vault.vry if hasattr(app.vault, 'vry') else verifying.Verifier(hby=self.hby, reger=self.rgy.reger)
 
-        self.psr = parsing.Parser(kvy=self.kvy, tvy=self.tvy, vry=self.vry)
-
         # For witness querying
         self.witq = agenting.WitnessInquisitor(hby=self.hby)
 
@@ -637,7 +640,12 @@ class AdmitDoer(doing.DoDoer):
                 if ked:
                     sadder = coring.Sadder(ked=ked)
                     ims = bytearray(sadder.raw) + pathed.get(label, b'')
-                    self.psr.parseOne(ims=ims)
+                    parsing.Parser(
+                        kvy=self.kvy,
+                        tvy=self.tvy,
+                        vry=self.vry,
+                        version=message_version(ims),
+                    ).parseOne(ims=ims)
 
             # Get credential SAID
             credential_said = acdc.get("d", "")
@@ -679,7 +687,7 @@ class AdmitDoer(doing.DoDoer):
             msg.extend(atc)
 
             # Parse locally
-            parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc)
+            parsing.Parser().parseOne(ims=bytes(msg), exc=self.exc, version=message_version(msg))
 
             # If save-only mode, we're done
             if self.save_only:

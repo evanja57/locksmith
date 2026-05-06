@@ -25,6 +25,7 @@ from hio.base import doing
 
 from locksmith.core.remoting import (
     introduce_watcher_observed_aid,
+    message_version,
     purge_oobi_resolution_state,
     resolve_oobi_blocking,
 )
@@ -1132,7 +1133,7 @@ class KFOnboardingService:
     def _has_any_local_witness_state(self, account_aid: str) -> bool:
         if not self._db or not account_aid:
             return False
-        for (hab_pre, _eid), _record in self._db.witnesses.getItemIter(keys=()):
+        for (hab_pre, _eid), _record in self._db.witnesses.getTopItemIter(keys=()):
             if hab_pre == account_aid:
                 return True
         return False
@@ -1634,6 +1635,7 @@ def parse_cesr_http_reply(
         rvy=app.vault.hby.rvy,
         exc=app.vault.hby.exc,
         local=False,
+        version=message_version(ims),
     )
     parser.parse(ims=bytearray(ims))
     app.vault.hby.kvy.processEscrows()

@@ -103,13 +103,16 @@ class MailboxDirector(doing.DoDoer):
         else:
             self.tvy = None
 
+        # keripy v2 still emits KERI 1.0 attachment counters on streams.
+        # Keep this parser on v1 until keripy supports mixed versions per frame.
         self.parser = parsing.Parser(ims=self.ims,
                                      framed=True,
                                      kvy=self.kvy,
                                      tvy=self.tvy,
                                      exc=self.exchanger,
                                      rvy=self.rvy,
-                                     vry=self.verifier)
+                                     vry=self.verifier,
+                                     version=kering.Vrsn_1_0)
 
         super(MailboxDirector, self).__init__(doers=doers, **kwa)
 

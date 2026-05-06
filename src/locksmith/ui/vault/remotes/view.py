@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 )
 from keri import help
-from keri.app import connecting
+from keri.app import organizing
 from keri.help import helping
 from keri.kering import Roles
 from keri.peer import exchanging
@@ -46,7 +46,7 @@ class ViewRemoteIdentifierDialog(LocksmithDialog):
             parent: Parent widget (typically VaultPage)
         """
         self.app = app
-        self.org = connecting.Organizer(hby=self.app.vault.hby)
+        self.org = organizing.Organizer(hby=self.app.vault.hby)
 
         self.remote_identifier_prefix = remote_identifier_prefix
 

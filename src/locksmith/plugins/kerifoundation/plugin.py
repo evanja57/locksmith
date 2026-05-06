@@ -420,7 +420,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
     def get_witness_state(self, vault: Any, wit_eid: str) -> Any | None:
         if not self._db:
             return None
-        for (_, eid), record in self._db.witnesses.getItemIter(keys=()):
+        for (_, eid), record in self._db.witnesses.getTopItemIter(keys=()):
             if eid == wit_eid:
                 return record
         return None

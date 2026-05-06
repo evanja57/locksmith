@@ -154,7 +154,7 @@ class RemoteIdentifierListPage(BaseListPage):
                     tags = []
 
                 if not tags:
-                    for (cid, role, eid), end in self.app.hby.db.ends.getItemIter():
+                    for (cid, role, eid), end in self.app.hby.db.ends.getTopItemIter():
                         if eid == rm_id['id'] and end.allowed:
                             tags.append(str.title(role))
 

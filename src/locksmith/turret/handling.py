@@ -56,7 +56,7 @@ class IdentifiersHandler:
 
         try:
             identifiers = []
-            for (ns, alias), prefix in self.hby.db.names.getItemIter(keys=()):
+            for (ns, alias), prefix in self.hby.db.names.getTopItemIter(keys=()):
                 if ns != "":
                     continue
                 msg = dict(name=alias, prefix=prefix)
@@ -330,7 +330,7 @@ class KELHandler:
                     url = urls[kering.Schemes.https] if kering.Schemes.https in urls else urls[kering.Schemes.http]
                     oobi = f"{url.rstrip("/")}/oobi/{hab.pre}/controller"
                 elif role in (kering.Roles.mailbox,):
-                    for (_, _, eid), end in hab.db.ends.getItemIter(keys=(hab.pre, kering.Roles.mailbox,)):
+                    for (_, _, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre, kering.Roles.mailbox,)):
                         if not (end.allowed and end.enabled is not False):
                             continue
 
