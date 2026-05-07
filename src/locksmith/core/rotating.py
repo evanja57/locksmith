@@ -322,7 +322,7 @@ class AuthenticateWitnessesDoer(doing.DoDoer):
                 )
 
                 # Verify we got enough receipts to meet TOAD
-                wigs = self.hab.db.getWigs(dbing.dgKey(self.hab.pre, self.hab.kever.serder.said))
+                wigs = self.hab.db.wigs.get(keys=dbing.dgKey(self.hab.pre, self.hab.kever.serder.said))
                 if len(wigs) < self.hab.kever.toader.num:
                     error_msg = f"Insufficient witness receipts: got {len(wigs)}, need {self.hab.kever.toader.num}"
                     logger.error(error_msg)

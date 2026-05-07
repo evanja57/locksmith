@@ -309,9 +309,9 @@ class GroupMultisigInceptDoer(doing.DoDoer):
 
             # Step 5: Start counselor escrow
             prefixer = coring.Prefixer(qb64=ghab.pre)
-            seqner = coring.Seqner(sn=0)
-            saider = coring.Saider(qb64=serder.said)
-            self.counselor.start(ghab=ghab, prefixer=prefixer, seqner=seqner, saider=saider)
+            seqner = coring.Number(sn=0)
+            saider = coring.Diger(qb64=serder.said)
+            self.counselor.start(ghab=ghab, prefixer=prefixer, number=seqner, diger=saider)
 
             logger.info(f"Started counselor escrow for {ghab.pre}")
 
@@ -494,9 +494,9 @@ class MultisigJoinDoer(doing.DoDoer):
 
             # Step 7: Start counselor escrow
             prefixer = coring.Prefixer(qb64=ghab.pre)
-            seqner = coring.Seqner(sn=0)
-            saider = coring.Saider(qb64=own_serder.said)
-            self.counselor.start(ghab=ghab, prefixer=prefixer, seqner=seqner, saider=saider)
+            seqner = coring.Number(sn=0)
+            saider = coring.Diger(qb64=own_serder.said)
+            self.counselor.start(ghab=ghab, prefixer=prefixer, number=seqner, diger=saider)
 
             logger.info(f"Started counselor escrow for {ghab.pre}")
 
@@ -639,7 +639,7 @@ class GroupMultisigRotateDoer(doing.DoDoer):
 
             # Step 3: Create rotation event
             prefixer = coring.Prefixer(qb64=self.ghab.pre)
-            seqner = coring.Seqner(sn=self.ghab.kever.sn + 1)
+            seqner = coring.Number(sn=self.ghab.kever.sn + 1)
 
             rot = self.ghab.rotate(
                 isith=self.isith, nsith=self.nsith,
@@ -678,8 +678,8 @@ class GroupMultisigRotateDoer(doing.DoDoer):
 
             # Step 6: Start counselor escrow
             self.counselor.start(
-                ghab=self.ghab, prefixer=prefixer, seqner=seqner,
-                saider=coring.Saider(qb64=rserder.said)
+                ghab=self.ghab, prefixer=prefixer, number=seqner,
+                diger=coring.Diger(qb64=rserder.said)
             )
             logger.info(f"Started counselor escrow for rotation of {self.ghab.pre}")
 
@@ -854,11 +854,11 @@ class MultisigRotationJoinDoer(doing.DoDoer):
             # Step 9: Start counselor escrow
             serder = SerderKERI(raw=rot)
             prefixer = coring.Prefixer(qb64=ghab.pre)
-            seqner = coring.Seqner(sn=serder.sn)
+            seqner = coring.Number(sn=serder.sn)
 
             self.counselor.start(
-                ghab=ghab, prefixer=prefixer, seqner=seqner,
-                saider=coring.Saider(qb64=serder.said)
+                ghab=ghab, prefixer=prefixer, number=seqner,
+                diger=coring.Diger(qb64=serder.said)
             )
             logger.info(f"Started counselor escrow for rotation join of {ghab.pre}")
 
@@ -966,7 +966,7 @@ def check_pending_multisig(app, hab):
     if not isinstance(hab, keri_habbing.GroupHab):
         return False
     try:
-        pending = True if app.vault.hby.db.gpse.get(hab.pre) else False
+        pending = True if app.vault.hby.db.gpse.get(keys=(hab.pre,)) else False
         return pending
     except Exception as e:
         logger.warning(f"Failed to check pending multisig for {hab.pre}: {e}")
@@ -1049,4 +1049,3 @@ class CounselingCompletionDoer(doing.DoDoer):
 
         self.vault.remove([self])
         return
-

@@ -185,7 +185,7 @@ class Vault(doing.DoDoer):
 
         # Add counseling doers for group identifiers awaiting participant signatures
         self.counseling_completion_doers = {}
-        for (pre,), (seqner, saider) in self.hby.db.gpse.getItemIter():
+        for (pre,), (seqner, saider) in self.hby.db.gpse.getTopItemIter(keys=()):
             prefixer = coring.Prefixer(qb64=pre)
             hab = self.hby.habByPre(pre)
 

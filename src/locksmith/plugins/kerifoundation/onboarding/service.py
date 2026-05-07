@@ -1262,7 +1262,7 @@ class KFOnboardingService:
 
         hab.psr.parseOne(ims=bytearray(response.content))
         dgkey = dbing.dgKey(hab.pre, hab.kever.serder.said)
-        wigs = hab.db.getWigs(dgkey)
+        wigs = hab.db.wigs.get(keys=dgkey)
         if len(wigs) < hab.kever.toader.num:
             raise KFBootError(
                 f"Insufficient witness receipts after rotation: got {len(wigs)}, need {hab.kever.toader.num}"

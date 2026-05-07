@@ -158,6 +158,6 @@ class LocksmithConfig:
         Returns:
             str: New 21-character random salt
         """
-        from keri.core import coring
-        self.salt = coring.randomNonce()[2:23]
+        from keri.core import signing
+        self.salt = signing.Salter().qb64[2:23]
         return self.salt

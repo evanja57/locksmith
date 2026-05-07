@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup
 from keri import help
-from keri.core import coring
+from keri.core import signing
 
 from locksmith.core import habbing
 from locksmith.ui import colors
@@ -127,7 +127,7 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
         advanced_config_layout.addLayout(radio_layout)
 
         # Generate random salt by default
-        default_salt = coring.randomNonce()[2:23]
+        default_salt = signing.Salter().qb64[2:23]
         self.key_salt_field = FloatingLabelLineEdit("Key Salt", password_mode=True)
         self.key_salt_field.setText(default_salt)
         advanced_config_layout.addWidget(self.key_salt_field)
@@ -249,14 +249,6 @@ class CreateIdentifierDialog(DelegationMixin, LocksmithDialog):
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
             logger.info("CreateIdentifierDialog: Connected to vault signal bridge")
-
-    def showEvent(self, event):
-        """Override showEvent to connect the participants selector to the dialog after it's shown."""
-        super().showEvent(event)
-
-        # Connect participants selector to dialog for height animation coordination if it exists
-        if self.participants_selector:
-            self.participants_selector.set_dialog(self)
 
     def create_identifier(self):
         """Create a new identifier using the form values."""

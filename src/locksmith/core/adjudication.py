@@ -250,8 +250,13 @@ class WatcherInquisitor(doing.DoDoer):
                 version=message_version(rpy),
             ).parse(bytearray(rpy))
 
+        elif rep.status == 204:
+            logger.debug(
+                f"watcher {wat} accepted key-state query for {target} without an inline response"
+            )
+
         else:
-            logger.info(f"invalid response {rep.status} from witnesses {wat}")
+            logger.info(f"invalid response {rep.status} from watcher {wat}")
 
         self.remove([client_doer])
 

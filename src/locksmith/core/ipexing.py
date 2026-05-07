@@ -84,7 +84,7 @@ class Granter:
         if recp is None:
             raise ValueError("unable to find recipient")
     
-        reg = self.rgy.reger.cloneTvtAt(creder.regi)
+        reg = self.rgy.reger.cloneTvtAt(creder.regid)
         iss = self.rgy.reger.cloneTvtAt(creder.said)
 
         iserder = serdering.SerderKERI(raw=bytes(iss))
@@ -324,7 +324,7 @@ class SendGrantDoer(doing.DoDoer):
             anc = self.hby.db.cloneEvtMsg(pre=serder.pre, fn=0, dig=serder.said)
 
             # Get registry info
-            reg = self.rgy.reger.cloneTvtAt(creder.regi)
+            reg = self.rgy.reger.cloneTvtAt(creder.regid)
 
             # Create grant exchange message
             timestamp = helping.nowIso8601()

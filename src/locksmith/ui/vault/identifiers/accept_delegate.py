@@ -261,7 +261,7 @@ class AcceptDelegateDialog(LocksmithDialog):
             # Look up in delegables
             edig = None
             sn_full = None
-            for (pre, sn), dig in self.app.vault.hby.db.delegables.getItemIter():
+            for (pre, sn), dig in self.app.vault.hby.db.delegables.getTopItemIter(keys=()):
                 if pre == delegate_prefix and sn[-1] == delegate_sn:
                     edig = dig
                     sn_full = sn

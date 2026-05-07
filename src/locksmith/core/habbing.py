@@ -502,10 +502,10 @@ def create_identifier(app, alias, key_type='salty', **kwargs):
                 delegator_hab = app.vault.hby.habByPre(creation_kwargs['delpre'])
                 anchor = dict(i=hab.pre, s="0", d=hab.pre)
                 delegator_hab.interact(data=[anchor])
-                seqner = coring.Seqner(sn=delegator_hab.kever.serder.sn)
-                couple = seqner.qb64b + delegator_hab.kever.serder.saidb
+                number = coring.Number(sn=delegator_hab.kever.serder.sn, code=coring.NumDex.Huge)
+                diger = coring.Diger(qb64b=delegator_hab.kever.serder.saidb)
                 dgkey = dbing.dgKey(anchor['i'], anchor['d'])
-                app.vault.hby.db.setAes(dgkey, couple)
+                app.vault.hby.db.aess.pin(keys=dgkey, val=(number, diger))
 
             return {
                 'success': True,
@@ -779,7 +779,7 @@ def get_identifier_details(app, hab):
 
     # Get witness receipts
     dgkey = dbing.dgKey(ser.preb, ser.saidb)
-    wigs = hab.db.getWigs(dgkey)
+    wigs = hab.db.wigs.get(keys=dgkey)
 
     # Check if resubmit is needed
     needs_resubmit = len(kever.wits) != len(wigs) if len(kever.wits) > 0 else False
@@ -927,7 +927,7 @@ def get_delegates_awaiting_approval(app, hab):
     delegates = []
 
     try:
-        for (pre, sn), edig in app.vault.hby.db.delegables.getItemIter():
+        for (pre, sn), edig in app.vault.hby.db.delegables.getTopItemIter(keys=()):
             delegates.append({
                 'pre': pre,
                 'sn': sn[-1],  # Get last element of sequence number
@@ -1113,10 +1113,9 @@ class ConfirmDoer(doing.DoDoer):
                 esc = self.escrowed
                 for pre, sn, edig in esc:
                     dgkey = dbing.dgKey(pre, edig)
-                    eraw = self.hby.db.getEvt(dgkey)
-                    if eraw is None:
+                    eserder = self.hby.db.evts.get(keys=dgkey)
+                    if eserder is None:
                         continue
-                    eserder = serdering.SerderKERI(raw=bytes(eraw))  # escrowed event
 
                     ilk = eserder.sad["t"]
                     if ilk in (coring.Ilks.dip,):
@@ -1164,8 +1163,8 @@ class ConfirmDoer(doing.DoDoer):
 
                             prefixer = coring.Prefixer(qb64=hab.pre)
                             sner = core.Number(num=serder.sn, code=core.NumDex.Huge)
-                            saider = coring.Saider(qb64b=serder.saidb)
-                            self.counselor.start(ghab=hab, prefixer=prefixer, seqner=sner, saider=saider)
+                            diger = coring.Diger(qb64b=serder.saidb)
+                            self.counselor.start(ghab=hab, prefixer=prefixer, number=sner, diger=diger)
 
                             while True:
                                 saider = self.hby.db.cgms.get(keys=(prefixer.qb64, sner.qb64))

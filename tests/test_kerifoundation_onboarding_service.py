@@ -420,12 +420,20 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
             self.raw = b"RAW"
             self.size = 3
 
+    class FakeWigs:
+        def __init__(self):
+            self.records = []
+
+        def append(self, val):
+            self.records.append(val)
+
+        def get(self, keys):
+            _ = keys
+            return list(self.records)
+
     class FakeDB:
         def __init__(self):
-            self.wigs = []
-
-        def getWigs(self, _key):
-            return list(self.wigs)
+            self.wigs = FakeWigs()
 
     fake_db = FakeDB()
 
@@ -514,7 +522,7 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
         ),
     ]
     assert auth_header
-    assert fake_db.getWigs(None) == [b"receipt"]
+    assert fake_db.wigs.get(keys=None) == [b"receipt"]
 
 
 def test_onboarding_service_runs_step_4_5_6_flow(tmp_path, monkeypatch):
