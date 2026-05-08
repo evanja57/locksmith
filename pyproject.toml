@@ -34,7 +34,7 @@ dependencies = [
     "qtawesome>=1.4.0",
     "mnemonic==0.21",
     "multicommand==1.0.0",
-    "pillow==11.0.0",
+    "pillow==12.2.0",
     "qrcode[pil]==8.2",
     "pyotp==2.9.0",
     "prometheus_client>=0.21.1",
