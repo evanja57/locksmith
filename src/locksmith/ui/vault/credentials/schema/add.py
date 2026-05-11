@@ -12,6 +12,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QFileDialog, QCheckBox
 
 from locksmith.core.credentialing import LoadSchemaDoer
+from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     FloatingLabelLineEdit,
@@ -224,14 +225,14 @@ class AddSchemaDialog(LocksmithDialog):
         self.issuer_dropdown.addItem("Select an issuer...")
 
         try:
-            # Get all local identifiers from the vault
-            hby = self.app.vault.hby
-            for hab_pre, hab in hby.habs.items():
+            for identifier in list_eligible_local_identifiers(self.app):
+                hab_pre = identifier["prefix"]
+                hab = self.app.vault.hby.habs[hab_pre]
                 # Format: "Name (prefix)"
                 display_text = f"{hab.name} ({hab_pre[:15]}...)"
                 self.issuer_dropdown.addItem(display_text, userData=hab_pre)
 
-            logger.debug(f"Populated issuer dropdown with {len(hby.habs)} identifiers")
+            logger.debug(f"Populated issuer dropdown with {self.issuer_dropdown.count() - 1} identifiers")
         except Exception as e:
             logger.exception(f"Error loading local identifiers: {e}")
             self.show_error(f"Failed to load issuers: {str(e)}")

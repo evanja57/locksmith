@@ -164,7 +164,32 @@ class LoadSchemaDoer(doing.DoDoer):
         Returns:
             str: Name of the created registry
         """
-        # Use schema SAID as registry name
+        registry_name = schema_said
+
+        # Check if registry already exists
+        existing_registry = self.rgy.registryByName(registry_name)
+        if existing_registry is not None:
+            seqner = coring.Seqner(sn=0)
+            if self.rgy.reger.ctel.get(keys=(existing_registry.regk, seqner.qb64)) is None:
+                raise kering.MissingEntryError(
+                    f"Registry {registry_name} already exists but is not complete; "
+                    "witness receipts may still be pending"
+                )
+            logger.info(f"Registry already exists and is complete: {registry_name}")
+            return registry_name
+
+        # Validate that issuer AID was provided
+        if not self.issuer_aid:
+            raise Exception("Issuer AID is required for registry creation")
+
+        # Get the hab for the issuer AID
+        if self.issuer_aid not in self.hby.habs:
+            raise Exception(f"Issuer identifier {self.issuer_aid} not found")
+
+        hab = self.hby.habs[self.issuer_aid]
+
+        logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
+
         counselor = grouping.Counselor(hby=self.hby)
 
         # Convert auth_codes list to dict format if provided
@@ -179,25 +204,6 @@ class LoadSchemaDoer(doing.DoDoer):
         postman = forwarding.Poster(hby=self.hby)
 
         self.extend([counselor, registrar, postman])
-
-        registry_name = schema_said
-
-        # Check if registry already exists
-        if registry_name in self.rgy.regs:
-            logger.info(f"Registry already exists: {registry_name}")
-            return registry_name
-
-        # Validate that issuer AID was provided
-        if not self.issuer_aid:
-            raise Exception("Issuer AID is required for registry creation")
-
-        # Get the hab for the issuer AID
-        if self.issuer_aid not in self.hby.habs:
-            raise Exception(f"Issuer identifier {self.issuer_aid} not found")
-
-        hab = self.hby.habs[self.issuer_aid]
-
-        logger.info(f"Creating credential registry: {registry_name} for issuer {hab.name} ({hab.pre})")
 
         kwa = dict(nonce=core_signing.Salter().qb64)
         registry = self.rgy.makeRegistry(name=registry_name, prefix=hab.pre, **kwa)

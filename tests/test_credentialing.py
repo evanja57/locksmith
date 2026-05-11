@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from keri import kering
 
 from locksmith.core import credentialing
 
@@ -50,6 +51,20 @@ class FakeRegistry:
 
     def issue(self, said, dt):
         return SimpleNamespace(pre=REGISTRY_SAID, snh="0", sn=0, said=TEL_SAID)
+
+
+class FakeSchemaRegistry:
+    regk = REGISTRY_SAID
+    regd = TEL_SAID
+    vcp = SimpleNamespace(raw=b"vcp", pre=REGISTRY_SAID, said=TEL_SAID)
+
+
+class FakeCtel:
+    def __init__(self, said=None):
+        self.said = said
+
+    def get(self, keys):
+        return self.said
 
 
 class FakeRgy:
@@ -153,6 +168,39 @@ def _run_until_done(generator, limit=8):
             return
 
     pytest.fail("IssueCredentialDoer did not finish within the bounded retry loop")
+
+
+def _immediate_generator_return(generator):
+    with pytest.raises(StopIteration) as excinfo:
+        next(generator)
+
+    return excinfo.value.value
+
+
+@pytest.mark.parametrize(
+    ("ctel_said", "expected_error"),
+    [
+        (TEL_SAID, None),
+        (None, "already exists but is not complete"),
+    ],
+)
+def test_load_schema_existing_registry_requires_committed_inception(ctel_said, expected_error):
+    class FakeRgy:
+        reger = SimpleNamespace(ctel=FakeCtel(ctel_said))
+
+        def registryByName(self, name):
+            return FakeSchemaRegistry()
+
+    doer = credentialing.LoadSchemaDoer.__new__(credentialing.LoadSchemaDoer)
+    doer.rgy = FakeRgy()
+
+    generator = doer._create_registry(SCHEMA_SAID, "Schema Title")
+
+    if expected_error:
+        with pytest.raises(kering.MissingEntryError, match=expected_error):
+            next(generator)
+    else:
+        assert _immediate_generator_return(generator) == SCHEMA_SAID
 
 
 def test_issue_credential_processes_verifier_escrows_before_completion(monkeypatch):

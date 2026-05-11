@@ -29,6 +29,9 @@ class DoerSignalBridge(QObject):
     # Specific signal for test doer count updates
     test_doer_count = Signal(int)
 
+    # Witness auth dialogs emit passcodes here for the waiting UI flow
+    auth_codes_entered = Signal(dict)
+
     def __init__(self):
         """Initialize the signal bridge."""
         super().__init__()

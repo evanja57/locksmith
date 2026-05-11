@@ -323,7 +323,6 @@ def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
     doer.hby = SimpleNamespace(
         habs={"ISSUER_AID": SimpleNamespace(name="issuer", pre="ISSUER_AID")}
     )
-    doer.rgy = SimpleNamespace(regs={})
     doer.issuer_aid = "ISSUER_AID"
     doer.auth_codes = None
     doer.tock = 0.0
@@ -333,7 +332,10 @@ def test_registry_creation_uses_keri_v2_nonce(monkeypatch):
         captured.update(name=name, prefix=prefix, nonce=kwa["nonce"])
         raise StopAfterNonce
 
-    doer.rgy.makeRegistry = make_registry
+    doer.rgy = SimpleNamespace(
+        registryByName=lambda name: None,
+        makeRegistry=make_registry,
+    )
 
     monkeypatch.setattr(
         locksmith_credentialing.grouping,

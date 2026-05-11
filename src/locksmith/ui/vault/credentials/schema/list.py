@@ -134,8 +134,8 @@ class SchemaListPage(BaseListPage):
         """Handle add schema button click."""
         logger.info("Add schema clicked")
 
-        dialog = AddSchemaDialog(app=self.app, parent=self.parent)
-        dialog.open()
+        self._add_schema_dialog = AddSchemaDialog(app=self.app, parent=self.parent)
+        self._add_schema_dialog.open()
 
     def _on_row_action(self, row_data: Dict[str, Any], action: str):
         """Handle row action from skewer menu."""
