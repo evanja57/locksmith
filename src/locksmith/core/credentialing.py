@@ -171,7 +171,7 @@ class LoadSchemaDoer(doing.DoDoer):
         if existing_registry is not None:
             seqner = coring.Seqner(sn=0)
             if self.rgy.reger.ctel.get(keys=(existing_registry.regk, seqner.qb64)) is None:
-                raise TimeoutError(
+                raise kering.MissingEntryError(
                     f"Registry {registry_name} already exists but is not complete; "
                     "witness receipts may still be pending"
                 )

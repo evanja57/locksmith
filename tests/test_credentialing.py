@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from keri import kering
 
 from locksmith.core import credentialing
 
@@ -196,7 +197,7 @@ def test_load_schema_existing_registry_requires_committed_inception(ctel_said, e
     generator = doer._create_registry(SCHEMA_SAID, "Schema Title")
 
     if expected_error:
-        with pytest.raises(TimeoutError, match=expected_error):
+        with pytest.raises(kering.MissingEntryError, match=expected_error):
             next(generator)
     else:
         assert _immediate_generator_return(generator) == SCHEMA_SAID
