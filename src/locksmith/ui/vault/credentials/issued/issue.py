@@ -4,7 +4,7 @@ locksmith.ui.vault.credentials.issued.issue module
 
 Dialog for issuing credentials
 """
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import QDateTime, QTimer
 from PySide6.QtGui import QIcon, QIntValidator, QDoubleValidator
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QDateTimeEdit, QCheckBox
 from keri import help
@@ -155,7 +155,19 @@ class IssueCredentialDialog(LocksmithDialog):
         # Connect to vault signal bridge for doer events
         if hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
+            self._doer_event_connected = True
             logger.info("IssueCredentialDialog: Connected to vault signal bridge")
+        else:
+            self._doer_event_connected = False
+
+    def _disconnect_doer_event_signal(self):
+        if not getattr(self, '_doer_event_connected', False):
+            return
+        try:
+            self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+        except RuntimeError:
+            pass
+        self._doer_event_connected = False
 
     def _disconnect_auth_codes_signal(self):
         if not self._auth_codes_connected:
@@ -169,6 +181,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
     def closeEvent(self, event):
         self._disconnect_auth_codes_signal()
+        self._disconnect_doer_event_signal()
         super().closeEvent(event)
 
     def _populate_schema_dropdown(self):
@@ -1064,17 +1077,9 @@ class IssueCredentialDialog(LocksmithDialog):
         # Handle credential issuance success
         if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
             logger.info(f"Credential issued successfully: {data.get('credential_said')}")
-
-            # Re-enable issue button
-            self.issue_button.setEnabled(True)
-            self.issue_button.setText("Issue Credential")
-
-            # Show success message
-            schema_title = data.get('schema_title', 'Credential')
-            self.show_success(f"{schema_title} issued successfully!")
-
-            # Close the dialog after a short delay
-            # (Let user see the success message)
+            # Defer close to the next event-loop tick so we are not still inside the signal
+            # dispatch that delivered this event (IssuedCredentialsListPage refreshes in parallel).
+            QTimer.singleShot(0, self.accept)
 
         # Handle credential issuance failure
         elif doer_name == "IssueCredentialDoer" and event_type == "credential_issuance_failed":
@@ -1096,6 +1101,9 @@ class IssueCredentialDialog(LocksmithDialog):
             data: Dictionary containing 'codes' key with list of "witness_id:passcode" strings
         """
         if not self._auth_pending:
+            logger.warning(
+                "Ignoring witness auth codes: credential issuance is not waiting for them."
+            )
             return
 
         self._auth_pending = False

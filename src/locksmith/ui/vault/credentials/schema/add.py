@@ -187,12 +187,36 @@ class AddSchemaDialog(LocksmithDialog):
         # Connect to vault signal bridge for doer events
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
-            self.app.vault.signals.auth_codes_entered.connect(self._on_auth_codes_entered)
             logger.info("AddSchemaDialog: Connected to vault signal bridge")
 
         # State for workflow with authentication
         self.pending_load_params = None  # Stores params while waiting for auth codes
+        self._auth_codes_connected = False
 
+    def _connect_auth_codes_signal(self):
+        """Subscribe to vault auth codes only while a schema load is awaiting witness OTP."""
+        if self._auth_codes_connected:
+            return
+        if self.app and getattr(self.app, "vault", None) and getattr(self.app.vault, "signals", None):
+            self.app.vault.signals.auth_codes_entered.connect(self._on_auth_codes_entered)
+            self._auth_codes_connected = True
+
+    def _disconnect_auth_codes_signal(self):
+        if not self._auth_codes_connected:
+            return
+        try:
+            self.app.vault.signals.auth_codes_entered.disconnect(self._on_auth_codes_entered)
+        except RuntimeError:
+            pass
+        self._auth_codes_connected = False
+
+    def closeEvent(self, event):
+        self._disconnect_auth_codes_signal()
+        if self.pending_load_params is not None:
+            self.pending_load_params = None
+            self.load_button.setEnabled(True)
+            self.load_button.setText("Load Schema")
+        super().closeEvent(event)
 
     def _on_connection_type_changed(self):
         """Handle connection type radio button selection changes."""
@@ -421,6 +445,7 @@ class AddSchemaDialog(LocksmithDialog):
                         signals=self.app.vault.signals,
                         parent=self
                     )
+                    self._connect_auth_codes_signal()
                     auth_dialog.open()
                     return
 
@@ -482,6 +507,7 @@ class AddSchemaDialog(LocksmithDialog):
                         signals=self.app.vault.signals,
                         parent=self
                     )
+                    self._connect_auth_codes_signal()
                     auth_dialog.open()
                     return
 
@@ -549,28 +575,32 @@ class AddSchemaDialog(LocksmithDialog):
         logger.info(f"Received {len(codes)} auth codes from WitnessAuthenticationDialog")
 
         if not self.pending_load_params:
-            logger.warning("Received auth codes but no pending load operation")
+            logger.debug("AddSchemaDialog: auth codes received with no pending load; ignoring")
+            self._disconnect_auth_codes_signal()
             return
 
         params = self.pending_load_params
         self.pending_load_params = None  # Clear pending state
 
-        # Launch LoadSchemaDoer with auth codes
-        if params['workflow'] == 'oobi':
-            self._create_load_schema_doer(
-                oobi=params['oobi'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
-        elif params['workflow'] == 'file':
-            self._create_load_schema_doer(
-                file_path=params['file_path'],
-                file_content=params['file_content'],
-                create_registry=params['create_registry'],
-                issuer_aid=params['issuer_aid'],
-                auth_codes=codes
-            )
+        try:
+            # Launch LoadSchemaDoer with auth codes
+            if params['workflow'] == 'oobi':
+                self._create_load_schema_doer(
+                    oobi=params['oobi'],
+                    create_registry=params['create_registry'],
+                    issuer_aid=params['issuer_aid'],
+                    auth_codes=codes
+                )
+            elif params['workflow'] == 'file':
+                self._create_load_schema_doer(
+                    file_path=params['file_path'],
+                    file_content=params['file_content'],
+                    create_registry=params['create_registry'],
+                    issuer_aid=params['issuer_aid'],
+                    auth_codes=codes
+                )
+        finally:
+            self._disconnect_auth_codes_signal()
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
         """

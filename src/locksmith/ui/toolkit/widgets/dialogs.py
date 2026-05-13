@@ -409,14 +409,31 @@ class LocksmithDialog(QDialog):
         self.overlay_animation.setDuration(300)
         self.overlay_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+    def _is_nested_under_locksmith_dialog(self, ancestor: QWidget) -> bool:
+        """True if this dialog's Qt parent chain includes ``ancestor`` (e.g. witness auth over issue UI)."""
+        p = self.parentWidget()
+        while p is not None:
+            if p is ancestor:
+                return True
+            p = p.parentWidget()
+        return False
+
     def showEvent(self, event):
         """Override showEvent to trigger fade-in animation."""
-        # Close any existing dialog before showing this one
-        if LocksmithDialog._current_dialog is not None and LocksmithDialog._current_dialog != self:
-            LocksmithDialog._current_dialog.close()
+        cur = LocksmithDialog._current_dialog
+        nested_under_current = (
+            cur is not None
+            and cur is not self
+            and self._is_nested_under_locksmith_dialog(cur)
+        )
 
-        # Set this as the current dialog
-        LocksmithDialog._current_dialog = self
+        # Close any existing peer dialog before showing this one (but not the parent
+        # of a nested dialog — e.g. Issue Credential must stay open while Witness Auth shows).
+        if cur is not None and cur is not self and not nested_under_current:
+            cur.close()
+
+        if not nested_under_current:
+            LocksmithDialog._current_dialog = self
 
         super().showEvent(event)
 

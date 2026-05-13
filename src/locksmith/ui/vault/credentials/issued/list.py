@@ -244,7 +244,9 @@ class IssuedCredentialsListPage(BaseListPage):
 
         # Refresh list when a credential is issued
         if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
-            logger.info(f"Credential issued: {data.get('schema')}, refreshing list")
+            logger.info(
+                f"Credential issued: {data.get('schema_title', data.get('schema_said'))}, refreshing list"
+            )
             self._load_issued_credentials_data()
 
         # Refresh list when a credential is revoked
