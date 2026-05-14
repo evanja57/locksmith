@@ -75,6 +75,12 @@ instance/
 docs/_build/
 .sphinx-diagnostics/
 
+# Sphinx Doctor local diagnostics mirror
+.sphinx-diagnostics/
+
+# Local docs virtual environment
+.venv-docs/
+
 # PyBuilder
 .pybuilder/
 target/
