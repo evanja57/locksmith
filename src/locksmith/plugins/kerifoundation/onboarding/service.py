@@ -1021,8 +1021,12 @@ class KFOnboardingService:
         task = asyncio.create_task(asyncio.to_thread(func, *args, **kwa))
         try:
             return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            result = await task
+        except asyncio.CancelledError as cancel:
+            try:
+                result = await task
+            except Exception:
+                logger.warning("Background onboarding operation failed after cancellation", exc_info=True)
+                raise asyncio.CancelledError from cancel
             if on_cancel_result is not None:
                 on_cancel_result(result)
             raise
