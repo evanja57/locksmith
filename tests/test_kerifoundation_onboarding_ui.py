@@ -5,6 +5,10 @@ visibility, alias validation, witness profile selection, confirm action,
 and resume-from-record behavior.
 """
 import os
+import asyncio
+import threading
+import time
+import warnings
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -67,6 +71,24 @@ class FakeBootClient:
         )
 
 
+class BlockingBootClient(FakeBootClient):
+    def __init__(self, release_event):
+        super().__init__(available=True)
+        self.release_event = release_event
+
+    def check_health(self):
+        self.release_event.wait(timeout=1.0)
+        return {"status": "ok"}
+
+    def fetch_bootstrap_config(self):
+        return SimpleNamespace(
+            watcher_required=True,
+            region_id="stale",
+            region_name="Stale Region",
+            account_options=[SimpleNamespace(code="1-of-1")],
+        )
+
+
 class FakeHab:
     def __init__(self, alias, pre):
         self.name = alias
@@ -118,6 +140,50 @@ def _make_page(tmp_path, record=None, *, app=None, boot_available=True):
     page.set_db(db)
     page.set_boot_client(FakeBootClient(available=boot_available))
     return page, db
+
+
+def _event_loop():
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                return asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                return loop
+
+
+def _wait_for_preflight(qapp, page, timeout=1.0):
+    loop = _event_loop()
+    deadline = time.monotonic() + timeout
+    while page._preflight_task is not None and time.monotonic() < deadline:
+        loop.run_until_complete(asyncio.sleep(0.01))
+        qapp.processEvents()
+    qapp.processEvents()
+
+
+def _show_page(qapp, page):
+    async def show():
+        page.on_show()
+        await asyncio.sleep(0)
+
+    _event_loop().run_until_complete(show())
+    qapp.processEvents()
+
+
+def _get_setup_page(qapp, plugin, vault):
+    result = {}
+
+    async def get_page():
+        result["value"] = plugin.get_setup_page(vault)
+        await asyncio.sleep(0)
+
+    _event_loop().run_until_complete(get_page())
+    qapp.processEvents()
+    return result["value"]
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +265,8 @@ class TestOnboardingPhases:
     def test_initial_phase_is_alias_input(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page.phase == PHASE_ALIAS_INPUT
             # Intro and alias sections not hidden
             assert not page._intro_section.isHidden()
@@ -214,7 +281,8 @@ class TestOnboardingPhases:
     def test_boot_connection_required_when_boot_surface_unavailable(self, qapp, tmp_path):
         page, db = _make_page(tmp_path, boot_available=False)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page.phase == PHASE_BOOTSTRAP_REQUIRED
             assert page._identity_section.isHidden()
             assert not page._connection_section.isHidden()
@@ -224,7 +292,8 @@ class TestOnboardingPhases:
     def test_valid_alias_shows_witness_section(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("my-account")
             assert page.phase == PHASE_WITNESS_CHOICE
             assert not page._witness_section.isHidden()
@@ -236,7 +305,8 @@ class TestOnboardingPhases:
     def test_witness_selection_shows_review(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("my-account")
             page._panel_1of1.setChecked(True)
             assert page.phase == PHASE_REVIEW
@@ -249,7 +319,8 @@ class TestOnboardingPhases:
     def test_3_of_4_selection(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("prod-account")
             page._panel_3of4.setChecked(True)
             assert page.phase == PHASE_REVIEW
@@ -261,7 +332,8 @@ class TestOnboardingPhases:
         app = FakeApp(habs=[FakeHab("existing-account", "AID_EXISTING")])
         page, db = _make_page(tmp_path, app=app)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._aid_selector.setCurrentIndex(1)
             assert page.phase == PHASE_WITNESS_CHOICE
             assert page._alias_container.isHidden()
@@ -273,7 +345,8 @@ class TestOnboardingPhases:
     def test_clearing_alias_hides_later_sections(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("my-account")
             page._panel_1of1.setChecked(True)
             assert page.phase == PHASE_REVIEW
@@ -295,7 +368,8 @@ class TestOnboardingPhases:
         )
         page, db = _make_page(tmp_path, record=record)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page.phase == PHASE_COMPLETED
             assert not page._progress_section.isHidden()
         finally:
@@ -311,9 +385,36 @@ class TestOnboardingPhases:
         )
         page, db = _make_page(tmp_path, record=record)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page.phase == PHASE_REVIEW
             assert not page._review_section.isHidden()
+            assert not page._progress_section.isHidden()
+            assert page._progress_badge.text() == "FAILED"
+            assert "abandoned locally" in page._progress_status.text()
+        finally:
+            db.close()
+
+    def test_failed_record_with_saved_session_shows_resume_message(self, qapp, tmp_path):
+        record = KFAccountRecord(
+            account_alias="resume-account",
+            status=ACCOUNT_STATUS_FAILED,
+            witness_profile_code="1-of-1",
+            witness_count=1,
+            toad=1,
+            onboarding_session_id="SESSION_1",
+            onboarding_auth_alias="kf-onboarding-auth",
+        )
+        page, db = _make_page(tmp_path, record=record)
+        try:
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
+            assert page.phase == PHASE_REVIEW
+            assert not page._progress_section.isHidden()
+            assert page._progress_badge.text() == "FAILED"
+            assert "Local progress is preserved" in page._progress_status.text()
+            assert "resume the saved session" in page._progress_status.text()
+            assert page._confirm_btn.isEnabled()
         finally:
             db.close()
 
@@ -331,7 +432,8 @@ class TestOnboardingResume:
         )
         page, db = _make_page(tmp_path, record=record)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page._alias_input.text() == "resumed-alias"
         finally:
             db.close()
@@ -346,7 +448,8 @@ class TestOnboardingResume:
         )
         page, db = _make_page(tmp_path, record=record)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             assert page._selected_witness_profile == "3-of-4"
             assert page._panel_3of4.isChecked()
             assert page.phase == PHASE_REVIEW
@@ -362,7 +465,8 @@ class TestOnboardingResume:
         try:
             # Simulate user already typed something
             page._alias_input.setText("user-typed")
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             # Should not overwrite
             assert page._alias_input.text() == "user-typed"
         finally:
@@ -380,7 +484,8 @@ class TestOnboardingResume:
             second.ensure_account()
 
             page.set_db(first)
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("carry-over-alias")
             page._panel_3of4.setChecked(True)
 
@@ -389,7 +494,8 @@ class TestOnboardingResume:
             assert page._panel_3of4.isChecked()
 
             page.set_db(second)
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
 
             assert page._alias_input.text() == ""
             assert page._selected_witness_profile == ""
@@ -398,6 +504,34 @@ class TestOnboardingResume:
             assert page._is_create_new_selected() is True
             assert page.phase == PHASE_ALIAS_INPUT
         finally:
+            first.close()
+            second.close()
+
+    def test_stale_preflight_result_is_ignored_after_vault_switch(self, qapp, tmp_path):
+        first = _make_db(tmp_path, name="first-vault-stale-preflight")
+        second = _make_db(tmp_path, name="second-vault-stale-preflight")
+        release = threading.Event()
+        page = KFOnboardingPage(app=FakeApp())
+        page.set_boot_client(BlockingBootClient(release))
+
+        try:
+            first.ensure_account()
+            second.ensure_account()
+
+            page.set_db(first)
+            _show_page(qapp, page)
+            assert page._preflight_task is not None
+
+            page.set_db(second)
+            release.set()
+            _event_loop().run_until_complete(asyncio.sleep(0.05))
+            _wait_for_preflight(qapp, page)
+
+            assert page._boot_connected is False
+            assert page._bootstrap is None
+            assert "Stale Region" not in page._boot_detail
+        finally:
+            release.set()
             first.close()
             second.close()
 
@@ -411,7 +545,8 @@ class TestOnboardingConfirm:
     def test_confirm_persists_choices(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("confirm-test")
             page._panel_1of1.setChecked(True)
 
@@ -442,7 +577,8 @@ class TestOnboardingConfirm:
         app = FakeApp(habs=[FakeHab("existing-account", "AID_EXISTING")])
         page, db = _make_page(tmp_path, app=app)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._aid_selector.setCurrentIndex(1)
             page._panel_1of1.setChecked(True)
 
@@ -462,7 +598,8 @@ class TestOnboardingConfirm:
     def test_confirm_blocked_without_alias(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._panel_1of1.setChecked(True)
             # Alias is empty
 
@@ -477,7 +614,8 @@ class TestOnboardingConfirm:
     def test_confirm_blocked_without_witness_profile(self, qapp, tmp_path):
         page, db = _make_page(tmp_path)
         try:
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("some-alias")
 
             received = []
@@ -494,7 +632,8 @@ class TestOnboardingLogging:
         page, db = _make_page(tmp_path)
         try:
             caplog.set_level("INFO")
-            page.on_show()
+            _show_page(qapp, page)
+            _wait_for_preflight(qapp, page)
             page._alias_input.setText("some-alias")
 
             assert not any(
@@ -545,7 +684,8 @@ class TestOnboardingGatingIntegration:
 
         try:
             assert plugin.is_setup_complete(vault) is False
-            page_key, should_push_menu = plugin.get_setup_page(vault)
+            page_key, should_push_menu = _get_setup_page(qapp, plugin, vault)
+            _wait_for_preflight(qapp, plugin._onboarding_page)
             assert page_key == "kf_onboarding"
             assert should_push_menu is True
         finally:

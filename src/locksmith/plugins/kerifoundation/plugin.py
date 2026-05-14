@@ -7,11 +7,12 @@ Locksmith users.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QDialog
-from PySide6.QtCore import Qt, QEvent, QObject, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QEvent, QObject
 from keri import help
 
 from locksmith.plugins.base import AccountProviderPlugin, PluginBase, WitnessProviderPlugin
@@ -41,82 +42,6 @@ from locksmith.plugins.kerifoundation.watchers.register import WatcherRegisterPa
 logger = help.ogler.getLogger(__name__)
 
 
-class _OnboardingWorker(QObject):
-    """Run KF onboarding off the UI thread."""
-
-    progress = Signal(object)
-    succeeded = Signal(str, object)
-    failed = Signal(str, str)
-    finished = Signal()
-
-    def __init__(self, *, app, db, boot_client, alias: str, witness_profile: str, account_aid: str):
-        super().__init__()
-        self._app = app
-        self._db = db
-        self._boot_client = boot_client
-        self._alias = alias
-        self._witness_profile = witness_profile
-        self._account_aid = account_aid
-        self._cancel_requested = False
-
-    def request_cancel(self):
-        self._cancel_requested = True
-
-    @Slot()
-    def run(self):
-        if self._cancel_requested:
-            self.finished.emit()
-            return
-        try:
-            service = KFOnboardingService(
-                app=self._app,
-                db=self._db,
-                boot_client=self._boot_client,
-            )
-            outcome = service.onboard(
-                alias=self._alias,
-                witness_profile_code=self._witness_profile,
-                account_aid=self._account_aid,
-                progress=self._emit_progress,
-            )
-        except Exception as ex:
-            logger.exception("KF onboarding failed")
-            if not self._cancel_requested:
-                self.failed.emit(self._alias, str(ex))
-        else:
-            if not self._cancel_requested:
-                self.succeeded.emit(self._alias, outcome)
-        finally:
-            self.finished.emit()
-
-    def _emit_progress(self, **kwa):
-        self.progress.emit(dict(kwa))
-
-
-class _OnboardingBridge(QObject):
-    """Marshal onboarding worker callbacks back onto the UI thread."""
-
-    def __init__(self, plugin: "KeriFoundationPlugin"):
-        super().__init__()
-        self._plugin = plugin
-
-    @Slot(object)
-    def on_progress(self, payload):
-        self._plugin._handle_onboarding_progress(payload)
-
-    @Slot(str, object)
-    def on_succeeded(self, alias, outcome):
-        self._plugin._handle_onboarding_success(alias, outcome)
-
-    @Slot(str, str)
-    def on_failed(self, alias, message):
-        self._plugin._handle_onboarding_failure(alias, message)
-
-    @Slot()
-    def on_finished(self):
-        self._plugin._finish_onboarding_run()
-
-
 class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlugin):
     """KERI Foundation witness/watcher provider plugin.
 
@@ -138,9 +63,8 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._id_btn = None
         self._wat_btn = None
         self._boot_client = KFBootClient(app)
-        self._onboarding_worker = None
-        self._onboarding_thread = None
-        self._onboarding_bridge = _OnboardingBridge(self)
+        self._onboarding_task: asyncio.Task | None = None
+        self._deferred_db_close_tasks: set[asyncio.Task] = set()
         self._closing_vault = False
 
         # Build pages
@@ -245,10 +169,10 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
     def on_vault_closed(self, vault: Any, *, clear: bool = False) -> None:
         self._closing_vault = True
-        self._shutdown_background_work(require_onboarding_stopped=False)
-        if self._db:
-            self._db.close(clear=clear)
-            self._db = None
+        stopped = self._shutdown_background_work(require_onboarding_stopped=False)
+        stateful_tasks = self._stateful_shutdown_tasks()
+        db = self._db
+        self._db = None
         self._onboarding_page.set_db(None)
         self._onboarding_page.set_boot_client(None)
         self._witness_overview.set_db(None)
@@ -258,11 +182,16 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._watcher_list.set_boot_client(None)
         self._watcher_register.set_db(None)
         self._boot_client.set_boot_server_aid("")
+        if db is not None:
+            if stopped or not stateful_tasks:
+                db.close(clear=clear)
+            else:
+                self._defer_db_close_until_tasks_finish(db, clear=clear, tasks=stateful_tasks)
         logger.info("KF plugin DB closed")
 
     def _shutdown_background_work(self, *, require_onboarding_stopped: bool) -> bool:
         stopped = True
-        if not self._shutdown_onboarding_worker():
+        if not self._shutdown_onboarding_task():
             message = (
                 "KF onboarding is still active and could not stop promptly. "
                 "Try vault deletion again after onboarding finishes or times out."
@@ -272,7 +201,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             logger.warning(message)
             stopped = False
 
-        for page in (self._onboarding_page, self._witness_overview, self._watcher_list):
+        for page in (self._onboarding_page, self._witness_overview, self._witness_provision, self._watcher_list):
             shutdown = getattr(page, "shutdown", None)
             if callable(shutdown):
                 if shutdown() is False:
@@ -285,19 +214,66 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             )
         return stopped
 
-    def _shutdown_onboarding_worker(self) -> bool:
-        if self._onboarding_worker is not None and hasattr(self._onboarding_worker, "request_cancel"):
-            self._onboarding_worker.request_cancel()
+    def _shutdown_onboarding_task(self) -> bool:
+        task = self._onboarding_task
+        if task is None:
+            return True
+        if task.done():
+            self._finish_onboarding_run()
+            return True
 
-        thread = self._onboarding_thread
-        if thread is not None:
-            logger.info("Waiting for active KF onboarding worker to finish before closing vault")
-            thread.quit()
-            if not thread.wait(self.ONBOARDING_SHUTDOWN_TIMEOUT_MS):
-                return False
+        logger.info("Cancelling active KF onboarding task before closing vault")
+        task.cancel()
+        loop = task.get_loop()
+        if not loop.is_running():
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        if task.done() and task is self._onboarding_task:
+            self._finish_onboarding_run()
+        return False
 
-        self._finish_onboarding_run()
-        return True
+    def _stateful_shutdown_tasks(self) -> list[asyncio.Task]:
+        tasks = []
+        for task in (
+            self._onboarding_task,
+            getattr(self._witness_provision, "_provision_task", None),
+        ):
+            if task is not None and not task.done():
+                tasks.append(task)
+        return tasks
+
+    def _defer_db_close_until_tasks_finish(self, db, *, clear: bool, tasks: list[asyncio.Task]) -> None:
+        async def close_when_done():
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                        logger.warning(
+                            "KF cleanup task failed before deferred DB close",
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+            finally:
+                db.close(clear=clear)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            db.close(clear=clear)
+            return
+
+        task = loop.create_task(close_when_done())
+        self._deferred_db_close_tasks.add(task)
+        task.add_done_callback(self._finish_deferred_db_close_task)
+
+    def _finish_deferred_db_close_task(self, task: asyncio.Task) -> None:
+        self._deferred_db_close_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("Deferred KF DB close task failed", exc_info=True)
 
     def is_setup_complete(self, vault: Any) -> bool:
         record = self._get_account_record()
@@ -434,8 +410,12 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
             logger.warning("Ignoring KF onboarding request while the vault is closing")
             return
 
-        if self._onboarding_thread is not None:
+        if self._onboarding_task is not None and not self._onboarding_task.done():
             logger.warning("Ignoring duplicate KF onboarding request while a run is already active")
+            return
+
+        if self._db is None:
+            self._onboarding_page.fail_run("Onboarding failed: KF account database is not available.")
             return
 
         logger.info(
@@ -447,25 +427,63 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._sync_boot_client_destination()
         self._onboarding_page.begin_run()
 
-        self._onboarding_thread = QThread()
-        self._onboarding_worker = _OnboardingWorker(
-            app=self._app,
-            db=self._db,
-            boot_client=self._boot_client.clone(),
+        self._onboarding_task = asyncio.create_task(self._run_onboarding(
             alias=alias,
             witness_profile=witness_profile,
             account_aid=account_aid,
-        )
-        self._onboarding_worker.moveToThread(self._onboarding_thread)
-        self._onboarding_thread.started.connect(self._onboarding_worker.run)
-        self._onboarding_worker.progress.connect(self._onboarding_bridge.on_progress)
-        self._onboarding_worker.succeeded.connect(self._onboarding_bridge.on_succeeded)
-        self._onboarding_worker.failed.connect(self._onboarding_bridge.on_failed)
-        self._onboarding_worker.finished.connect(self._onboarding_thread.quit)
-        self._onboarding_thread.finished.connect(self._onboarding_worker.deleteLater)
-        self._onboarding_thread.finished.connect(self._onboarding_thread.deleteLater)
-        self._onboarding_thread.finished.connect(self._onboarding_bridge.on_finished)
-        self._onboarding_thread.start()
+            db=self._db,
+            boot_client=self._boot_client.clone(),
+            vault=getattr(self._app, "vault", None),
+        ))
+
+    async def _run_onboarding(
+        self,
+        *,
+        alias: str,
+        witness_profile: str,
+        account_aid: str,
+        db,
+        boot_client,
+        vault,
+    ):
+        task = asyncio.current_task()
+        service = KFOnboardingService(app=self._app, db=db, boot_client=boot_client)
+
+        def progress(**kwa):
+            if self._is_current_onboarding_task(task, vault=vault, db=db):
+                self._handle_onboarding_progress(dict(kwa))
+
+        try:
+            outcome = await service.onboard_async(
+                alias=alias,
+                witness_profile_code=witness_profile,
+                account_aid=account_aid,
+                progress=progress,
+            )
+        except asyncio.CancelledError:
+            logger.info("KF onboarding task cancelled for alias='%s'", alias)
+            raise
+        except Exception as ex:
+            logger.exception("KF onboarding failed")
+            if self._is_current_onboarding_task(task, vault=vault, db=db):
+                self._handle_onboarding_failure(alias, str(ex))
+        else:
+            if self._is_current_onboarding_task(task, vault=vault, db=db):
+                self._handle_onboarding_success(alias, outcome)
+        finally:
+            if task is self._onboarding_task:
+                self._finish_onboarding_run()
+
+    def _is_current_onboarding_task(self, task, *, vault, db) -> bool:
+        if self._closing_vault:
+            return False
+        if task is not self._onboarding_task:
+            return False
+        if db is not self._db:
+            return False
+        if vault is not getattr(self._app, "vault", None):
+            return False
+        return True
 
     def _handle_onboarding_progress(self, kwa: dict):
         if self._closing_vault:
@@ -519,8 +537,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         logger.error("KF onboarding failed for alias='%s': %s", alias, message)
 
     def _finish_onboarding_run(self):
-        self._onboarding_worker = None
-        self._onboarding_thread = None
+        self._onboarding_task = None
 
     def _emit_identifier_created(self, *, alias: str, pre: str) -> None:
         vault = getattr(self._app, "vault", None)

@@ -6,6 +6,7 @@ KF onboarding orchestration and boot-backed account transport helpers.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urljoin
@@ -27,7 +28,7 @@ from locksmith.core.remoting import (
     introduce_watcher_observed_aid,
     message_version,
     purge_oobi_resolution_state,
-    resolve_oobi_blocking,
+    resolve_oobi,
 )
 from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_ONBOARDED,
@@ -670,7 +671,7 @@ class KFOnboardingService:
         self._boot_client = boot_client
         self._witness_registrar = witness_registrar or HostedWitnessRegistrar(app=app, db=db)
 
-    def onboard(
+    async def onboard_async(
         self,
         *,
         alias: str,
@@ -678,9 +679,16 @@ class KFOnboardingService:
         account_aid: str = "",
         progress: ProgressFn = None,
     ) -> OnboardingOutcome:
+        """Async UI orchestration for onboarding.
+
+        Hosted-service HTTP remains in the existing synchronous clients and
+        is isolated with ``asyncio.to_thread``. KERI protocol waits use the
+        app's existing async/doer-backed helpers.
+        """
         record = self._ensure_account_record()
+        had_saved_session = bool(record.onboarding_session_id and record.onboarding_auth_alias)
         self._emit(progress, stage="bootstrap", detail="Fetching bootstrap config")
-        bootstrap = self._boot_client.fetch_bootstrap_config()
+        bootstrap = await asyncio.to_thread(self._boot_client.fetch_bootstrap_config)
 
         option = bootstrap.option(witness_profile_code)
         if option is None:
@@ -699,6 +707,7 @@ class KFOnboardingService:
         account_hab = None
         ehab = None
         witness_registration: HostedWitnessRegistration | None = None
+        remote_completed = False
         created_new_account = not self._account_hab_exists(
             record=record,
             alias=alias,
@@ -731,7 +740,7 @@ class KFOnboardingService:
             else:
                 self._emit(progress, stage="ephemeral_aid", detail="Loaded hidden onboarding AID for retry")
 
-            start, session_cleared = self._load_existing_session(
+            start, session_cleared = await self._load_existing_session_async(
                 ehab=ehab,
                 record=record,
                 account_hab=account_hab,
@@ -743,15 +752,26 @@ class KFOnboardingService:
                 self._emit(progress, stage="ephemeral_aid", detail="Created hidden onboarding AID")
             if start is None:
                 self._emit(progress, stage="ephemeral_aid", detail="Sending onboarding inception to the boot surface")
-                self._boot_client.send_ephemeral_inception(ehab)
+                await self._await_blocking_result(
+                    self._boot_client.send_ephemeral_inception,
+                    ehab,
+                )
+
                 self._emit(progress, stage="session_start", detail="Starting authenticated onboarding session")
-                start = self._boot_client.start_onboarding(
+
+                def remember_start(value):
+                    nonlocal start
+                    start = value
+
+                start = await self._await_blocking_result(
+                    self._boot_client.start_onboarding,
                     ehab,
                     alias=alias,
                     account_aid=account_hab.pre,
                     witness_profile_code=witness_profile_code,
                     region_id=bootstrap.region_id,
                     watcher_required=bootstrap.watcher_required,
+                    on_cancel_result=remember_start,
                 )
 
             self._emit(
@@ -798,7 +818,7 @@ class KFOnboardingService:
                     stage="witness_registration",
                     detail="Registering the account AID with allocated witnesses",
                 )
-                witness_registration = self._witness_registrar.register(
+                witness_registration = await self._witness_registrar.register(
                     hab=account_hab,
                     witnesses=start.witnesses,
                     batch_mode=True,
@@ -817,7 +837,7 @@ class KFOnboardingService:
                     stage="witness_rotation",
                     detail="Rotating the local account AID onto the hosted witness set",
                 )
-                self._rotate_account_to_allocated_witnesses(
+                await self._rotate_account_to_allocated_witnesses_async(
                     hab=account_hab,
                     registration=witness_registration,
                     allocated_witness_eids=[witness.eid for witness in start.witnesses],
@@ -826,20 +846,22 @@ class KFOnboardingService:
 
             if start.watcher is not None:
                 self._emit(progress, stage="watcher_resolution", detail="Resolving the required hosted watcher OOBI")
-                self._resolve_watcher_oobi(account_hab=account_hab, watcher=start.watcher)
+                await self._resolve_watcher_oobi_async(account_hab=account_hab, watcher=start.watcher)
                 self._emit(
                     progress,
                     stage="watcher_binding",
                     detail="Introducing the permanent account AID to the hosted watcher",
                 )
-                self._introduce_account_to_watcher(
+                await self._await_blocking_result(
+                    self._introduce_account_to_watcher,
                     account_hab=account_hab,
                     watcher=start.watcher,
                     witnesses=start.witnesses,
                 )
 
             self._emit(progress, stage="account_create", detail="Sending /onboarding/account/create")
-            self._boot_client.create_account(
+            await self._await_blocking_result(
+                self._boot_client.create_account,
                 ehab,
                 session_id=start.session_id,
                 account_aid=account_hab.pre,
@@ -851,39 +873,64 @@ class KFOnboardingService:
             )
 
             self._emit(progress, stage="complete", detail="Sending /onboarding/complete")
-            self._boot_client.complete_onboarding(
+
+            def mark_remote_completed(_value):
+                nonlocal remote_completed
+                remote_completed = True
+
+            await self._await_blocking_result(
+                self._boot_client.complete_onboarding,
                 ehab,
                 session_id=start.session_id,
                 account_aid=account_hab.pre,
+                on_cancel_result=mark_remote_completed,
             )
-        except Exception:
-            if self._should_preserve_onboarding_session(start=start, account_hab=account_hab):
-                self._pin_account_progress(
+            remote_completed = True
+        except asyncio.CancelledError:
+            if remote_completed and account_hab is not None and start is not None and witness_registration is not None:
+                self._complete_onboarding_record(
                     record=record,
                     alias=alias,
                     witness_profile_code=witness_profile_code,
-                    witness_count=(start.witness_count if start is not None else option.witness_count) or option.witness_count,
-                    toad=(start.toad if start is not None else option.toad) or option.toad,
+                    witness_count=start.witness_count or option.witness_count,
+                    toad=start.toad or option.toad,
                     watcher_required=bootstrap.watcher_required,
-                    region_id=(start.region_id if start is not None else bootstrap.region_id) or bootstrap.region_id,
-                    account_aid=getattr(account_hab, "pre", record.account_aid),
-                    boot_server_aid=self._boot_client.boot_server_aid or record.boot_server_aid,
-                    status=record.status,
-                    onboarding_session_id=start.session_id if start is not None else record.onboarding_session_id,
-                    onboarding_auth_alias=getattr(ehab, "name", "") or record.onboarding_auth_alias,
-                )
-            else:
-                self._abandon_onboarding_run(
-                    ehab=ehab,
-                    start=start,
-                    account_hab=account_hab,
-                    witness_registration=witness_registration,
+                    region_id=start.region_id or bootstrap.region_id,
+                    account_aid=account_hab.pre,
+                    boot_server_aid=self._boot_client.boot_server_aid,
+                    status=ACCOUNT_STATUS_ONBOARDED,
+                    onboarded_at=helping.nowIso8601(),
                 )
                 self._clear_onboarding_session(record, delete_auth_hab=True)
-                if created_new_account and account_hab is not None:
-                    self._delete_local_account_hab(account_hab)
-                    record.account_aid = ""
-                    record.account_alias = ""
+            else:
+                await self._preserve_or_abandon_onboarding_run(
+                    record=record,
+                    alias=alias,
+                    witness_profile_code=witness_profile_code,
+                    option=option,
+                    bootstrap=bootstrap,
+                    start=start,
+                    account_hab=account_hab,
+                    ehab=ehab,
+                    witness_registration=witness_registration,
+                    had_saved_session=had_saved_session,
+                    created_new_account=created_new_account,
+                )
+            raise
+        except Exception:
+            await self._preserve_or_abandon_onboarding_run(
+                record=record,
+                alias=alias,
+                witness_profile_code=witness_profile_code,
+                option=option,
+                bootstrap=bootstrap,
+                start=start,
+                account_hab=account_hab,
+                ehab=ehab,
+                witness_registration=witness_registration,
+                had_saved_session=had_saved_session,
+                created_new_account=created_new_account,
+            )
             raise
 
         if account_hab is None or start is None or witness_registration is None:
@@ -915,7 +962,7 @@ class KFOnboardingService:
             watcher=start.watcher,
         )
 
-    def _load_existing_session(
+    async def _load_existing_session_async(
         self,
         *,
         ehab: Any,
@@ -929,7 +976,8 @@ class KFOnboardingService:
 
         try:
             self._emit(progress, stage="session_start", detail="Resuming the saved onboarding session")
-            start = self._boot_client.session_status(
+            start = await asyncio.to_thread(
+                self._boot_client.session_status,
                 ehab,
                 session_id=record.onboarding_session_id,
                 destination=record.boot_server_aid,
@@ -961,6 +1009,75 @@ class KFOnboardingService:
             )
 
         return start, False
+
+    @staticmethod
+    async def _await_blocking_result(func, /, *args, on_cancel_result=None, **kwa):
+        """Run blocking work without losing cancellation-side effects.
+
+        Started thread work is shielded from cancellation. If it finishes after
+        this coroutine is cancelled, the late result is handed to
+        on_cancel_result before cancellation is re-raised.
+        """
+        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwa))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            result = await task
+            if on_cancel_result is not None:
+                on_cancel_result(result)
+            raise
+
+    async def _preserve_or_abandon_onboarding_run(
+        self,
+        *,
+        record: KFAccountRecord,
+        alias: str,
+        witness_profile_code: str,
+        option: BootstrapOption,
+        bootstrap: BootstrapConfig,
+        start: OnboardingStartReply | None,
+        account_hab: Any | None,
+        ehab: Any | None,
+        witness_registration: HostedWitnessRegistration | None,
+        had_saved_session: bool,
+        created_new_account: bool,
+    ) -> None:
+        preserve_stored_session = (
+            had_saved_session
+            and account_hab is not None
+            and bool(record.onboarding_session_id)
+            and bool(record.onboarding_auth_alias)
+            and not self._can_discard_stored_session(record=record, account_hab=account_hab)
+        )
+        if self._should_preserve_onboarding_session(start=start, account_hab=account_hab) or preserve_stored_session:
+            self._pin_account_progress(
+                record=record,
+                alias=alias,
+                witness_profile_code=witness_profile_code,
+                witness_count=(start.witness_count if start is not None else option.witness_count) or option.witness_count,
+                toad=(start.toad if start is not None else option.toad) or option.toad,
+                watcher_required=bootstrap.watcher_required,
+                region_id=(start.region_id if start is not None else bootstrap.region_id) or bootstrap.region_id,
+                account_aid=getattr(account_hab, "pre", record.account_aid),
+                boot_server_aid=self._boot_client.boot_server_aid or record.boot_server_aid,
+                status=record.status,
+                onboarding_session_id=start.session_id if start is not None else record.onboarding_session_id,
+                onboarding_auth_alias=getattr(ehab, "name", "") or record.onboarding_auth_alias,
+            )
+            return
+
+        await self._abandon_onboarding_run_async(
+            ehab=ehab,
+            start=start,
+            account_hab=account_hab,
+            witness_registration=witness_registration,
+        )
+        self._clear_onboarding_session(record, delete_auth_hab=True)
+        if created_new_account and account_hab is not None:
+            self._delete_local_account_hab(account_hab)
+            record.account_aid = ""
+            record.account_alias = ""
+            self._db.pin_account(record)
 
     def _create_or_load_account_hab(
         self,
@@ -1190,7 +1307,7 @@ class KFOnboardingService:
 
         return True
 
-    def _rotate_account_to_allocated_witnesses(
+    def _rotate_account_to_allocated_witnesses_blocking(
         self,
         *,
         hab: Any,
@@ -1229,6 +1346,39 @@ class KFOnboardingService:
             doing.Doist(tock=0.03125, real=True).do(doers=[receiptor, runner], limit=30.0)
         except Exception as exc:
             raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
+
+    async def _rotate_account_to_allocated_witnesses_async(
+        self,
+        *,
+        hab: Any,
+        registration: HostedWitnessRegistration,
+        allocated_witness_eids: list[str],
+        toad: int,
+    ) -> None:
+        if len(allocated_witness_eids) == 1:
+            auths = self._build_witness_auths(registration)
+            witness_eid = allocated_witness_eids[0]
+            witness_url = self._single_witness_url(registration=registration, witness_eid=witness_eid)
+            try:
+                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+                await self._await_blocking_result(
+                    self._receipt_single_witness_rotation,
+                    hab=hab,
+                    witness_eid=witness_eid,
+                    witness_url=witness_url,
+                    auth=auths.get(witness_eid, ""),
+                )
+            except Exception as exc:
+                raise KFBootError(f"Failed rotating the local account AID onto hosted witnesses: {exc}") from exc
+            return
+
+        await self._await_blocking_result(
+            self._rotate_account_to_allocated_witnesses_blocking,
+            hab=hab,
+            registration=registration,
+            allocated_witness_eids=allocated_witness_eids,
+            toad=toad,
+        )
 
     def _receipt_single_witness_rotation(
         self,
@@ -1320,7 +1470,7 @@ class KFOnboardingService:
         if watcher_required and start.watcher is None:
             raise KFBootError("Onboarding reply did not include the required hosted watcher")
 
-    def _abandon_onboarding_run(
+    async def _abandon_onboarding_run_async(
         self,
         *,
         ehab: Any | None,
@@ -1330,15 +1480,50 @@ class KFOnboardingService:
     ) -> None:
         if start is not None and ehab is not None:
             try:
-                self._boot_client.cancel_onboarding(
-                    ehab,
-                    session_id=start.session_id,
-                    account_aid=getattr(account_hab, "pre", "") if account_hab is not None else "",
-                    reason="client_abandoned",
+                await self._await_blocking_result(
+                    self._cancel_onboarding_session,
+                    ehab=ehab,
+                    start=start,
+                    account_hab=account_hab,
                 )
-            except Exception:
-                logger.warning("Failed abandoning KF onboarding session %s", start.session_id, exc_info=True)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "KF onboarding session cleanup was interrupted for %s",
+                    start.session_id,
+                )
+        self._clear_abandoned_onboarding_state(
+            start=start,
+            account_hab=account_hab,
+            witness_registration=witness_registration,
+        )
 
+    def _cancel_onboarding_session(
+        self,
+        *,
+        ehab: Any | None,
+        start: OnboardingStartReply | None,
+        account_hab: Any | None,
+    ) -> None:
+        if start is None or ehab is None:
+            return
+
+        try:
+            self._boot_client.cancel_onboarding(
+                ehab,
+                session_id=start.session_id,
+                account_aid=getattr(account_hab, "pre", "") if account_hab is not None else "",
+                reason="client_abandoned",
+            )
+        except Exception:
+            logger.warning("Failed abandoning KF onboarding session %s", start.session_id, exc_info=True)
+
+    def _clear_abandoned_onboarding_state(
+        self,
+        *,
+        start: OnboardingStartReply | None,
+        account_hab: Any | None,
+        witness_registration: HostedWitnessRegistration | None,
+    ) -> None:
         if witness_registration is not None:
             self._remove_local_witness_state(
                 account_aid=getattr(account_hab, "pre", ""),
@@ -1431,12 +1616,12 @@ class KFOnboardingService:
             except Exception:
                 logger.warning("Failed removing remote identifier %s from Organizer", eid, exc_info=True)
 
-    def _resolve_watcher_oobi(self, *, account_hab: Any, watcher: HostedWatcherAllocation) -> None:
+    async def _resolve_watcher_oobi_async(self, *, account_hab: Any, watcher: HostedWatcherAllocation) -> None:
         if not watcher.oobi:
             raise KFBootError("Hosted watcher reply is missing an OOBI")
 
         alias = watcher.name or f"KF Watcher {watcher.eid[:12]}"
-        resolved = resolve_oobi_blocking(
+        resolved = await resolve_oobi(
             self._app,
             pre=watcher.eid,
             oobi=watcher.oobi,

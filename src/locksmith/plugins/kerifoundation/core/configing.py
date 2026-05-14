@@ -67,6 +67,34 @@ class WitnessServerConfig:
     label: str = ""
 
 
+DEFAULT_DEV_WITNESS_SERVERS = [
+    WitnessServerConfig(
+        witness_url="http://127.0.0.1:5632",
+        boot_url="http://127.0.0.1:5631",
+        region="Local Test Infra",
+        label="Local Witness 1",
+    ),
+    WitnessServerConfig(
+        witness_url="http://127.0.0.1:5642",
+        boot_url="http://127.0.0.1:5641",
+        region="Local Test Infra",
+        label="Local Witness 2",
+    ),
+    WitnessServerConfig(
+        witness_url="http://127.0.0.1:5652",
+        boot_url="http://127.0.0.1:5651",
+        region="Local Test Infra",
+        label="Local Witness 3",
+    ),
+    WitnessServerConfig(
+        witness_url="http://127.0.0.1:5662",
+        boot_url="http://127.0.0.1:5661",
+        region="Local Test Infra",
+        label="Local Witness 4",
+    ),
+]
+
+
 def load_witness_servers(app: Any) -> list[WitnessServerConfig]:
     """Load provisionable witness servers for the app's current environment.
 
@@ -132,6 +160,8 @@ def load_witness_servers(app: Any) -> list[WitnessServerConfig]:
     legacy_witness_url = os.environ.get(f"{prefix}_WITNESS_URL", "").strip()
     legacy_boot_url = os.environ.get(f"{prefix}_BOOT_URL", "").strip()
     if not legacy_witness_url and not legacy_boot_url:
+        if env_name == "development":
+            return list(DEFAULT_DEV_WITNESS_SERVERS)
         return []
 
     if not legacy_witness_url or not legacy_boot_url:

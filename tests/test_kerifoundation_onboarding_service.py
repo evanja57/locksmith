@@ -1,4 +1,6 @@
+import asyncio
 import os
+import threading
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,6 +13,10 @@ from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_ONBOARDED,
     KFBaser,
     KFAccountRecord,
+)
+from locksmith.plugins.kerifoundation.core.configing import (
+    DEFAULT_DEV_WITNESS_SERVERS,
+    load_witness_servers,
 )
 from locksmith.plugins.kerifoundation.onboarding.service import (
     BootstrapConfig,
@@ -359,23 +365,50 @@ class WrongTopologyBootClient(FakeBootClient):
         )
 
 
+class FailingSessionStatusBootClient(FakeBootClient):
+    def session_status(self, hab, *, session_id, destination="", fallback_region_id=""):
+        _ = (destination, fallback_region_id)
+        self.status_calls += 1
+        self.calls.append(("status", hab.pre, session_id))
+        raise KFBootError("session status unavailable")
+
+
+class BlockingStartBootClient(FakeBootClient):
+    def __init__(self, *, started, release):
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    def start_onboarding(self, hab, *, alias, account_aid, witness_profile_code, region_id, watcher_required):
+        self.started.set()
+        self.release.wait(timeout=1.0)
+        return super().start_onboarding(
+            hab,
+            alias=alias,
+            account_aid=account_aid,
+            witness_profile_code=witness_profile_code,
+            region_id=region_id,
+            watcher_required=watcher_required,
+        )
+
+
 class FakeWitnessRegistrar:
     def __init__(self):
         self.calls = []
 
-    def register(self, *, hab, witnesses, batch_mode=True, persist=True):
+    async def register(self, *, hab, witnesses, batch_mode=True, persist=True):
         self.calls.append((hab.pre, [wit.eid for wit in witnesses], batch_mode, persist))
         return HostedWitnessRegistration(
             results=[
                 {
                     "eid": witness.eid,
-                    "totp_seed": f"SEED_{index}",
+                    "totp_seed": "JBSWY3DPEHPK3PXP",
                     "oobi": witness.oobi,
                     "boot_url": witness.boot_url,
                     "witness_url": witness.witness_url,
                     "name": witness.name,
                 }
-                for index, witness in enumerate(witnesses, start=1)
+                for witness in witnesses
             ],
             batch_mode=batch_mode,
         )
@@ -383,6 +416,11 @@ class FakeWitnessRegistrar:
 
 def _make_db(tmp_path, name):
     return KFBaser(name=name, headDirPath=str(tmp_path), reopen=True)
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
 
 def stub_rotation(service):
     calls = []
@@ -399,7 +437,7 @@ def stub_rotation(service):
             }
         )
 
-    service._rotate_account_to_allocated_witnesses = fake_rotate
+    service._rotate_account_to_allocated_witnesses_blocking = fake_rotate
     return calls
 
 
@@ -495,7 +533,7 @@ def test_single_witness_rotation_posts_direct_receipt(tmp_path, monkeypatch):
     )
 
     try:
-        service._rotate_account_to_allocated_witnesses(
+        service._rotate_account_to_allocated_witnesses_blocking(
             hab=hab,
             registration=registration,
             allocated_witness_eids=["WIT_1"],
@@ -533,14 +571,14 @@ def test_onboarding_service_runs_step_4_5_6_flow(tmp_path, monkeypatch):
     progress = []
     watcher_bind_calls = []
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     def fake_introduce_watcher(*args, **kwa):
         watcher_bind_calls.append(kwa)
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
@@ -556,10 +594,12 @@ def test_onboarding_service_runs_step_4_5_6_flow(tmp_path, monkeypatch):
             witness_registrar=witness_registrar,
         )
         rotation_calls = stub_rotation(service)
-        outcome = service.onboard(
-            alias="my account",
-            witness_profile_code="3-of-4",
-            progress=lambda **kwa: progress.append(kwa),
+        outcome = _run(
+            service.onboard_async(
+                alias="my account",
+                witness_profile_code="3-of-4",
+                progress=lambda **kwa: progress.append(kwa),
+            )
         )
 
         record = db.get_account()
@@ -660,11 +700,11 @@ def test_onboarding_service_reuses_existing_permanent_account_aid(tmp_path, monk
     boot_client = FakeBootClient()
     witness_registrar = FakeWitnessRegistrar()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -684,7 +724,7 @@ def test_onboarding_service_reuses_existing_permanent_account_aid(tmp_path, monk
             witness_registrar=witness_registrar,
         )
         rotation_calls = stub_rotation(service)
-        outcome = service.onboard(alias="my account", witness_profile_code="3-of-4")
+        outcome = _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
 
         assert outcome.account_aid == "AID_EXISTING"
         assert [call for call in app.vault.hby.make_hab_calls if call["ns"] == ""] == []
@@ -708,11 +748,11 @@ def test_onboarding_service_uses_selected_existing_account_aid(tmp_path, monkeyp
     boot_client = FakeBootClient()
     witness_registrar = FakeWitnessRegistrar()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -724,10 +764,12 @@ def test_onboarding_service_uses_selected_existing_account_aid(tmp_path, monkeyp
             witness_registrar=witness_registrar,
         )
         rotation_calls = stub_rotation(service)
-        outcome = service.onboard(
-            alias="selected-account",
-            witness_profile_code="3-of-4",
-            account_aid="AID_EXISTING",
+        outcome = _run(
+            service.onboard_async(
+                alias="selected-account",
+                witness_profile_code="3-of-4",
+                account_aid="AID_EXISTING",
+            )
         )
 
         assert outcome.account_aid == "AID_EXISTING"
@@ -746,11 +788,11 @@ def test_onboarding_service_rotates_selected_unwitnessed_account_aid(tmp_path, m
     boot_client = FakeBootClient()
     witness_registrar = FakeWitnessRegistrar()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -763,10 +805,12 @@ def test_onboarding_service_rotates_selected_unwitnessed_account_aid(tmp_path, m
         )
         rotation_calls = stub_rotation(service)
 
-        outcome = service.onboard(
-            alias="selected-account",
-            witness_profile_code="3-of-4",
-            account_aid="AID_EXISTING",
+        outcome = _run(
+            service.onboard_async(
+                alias="selected-account",
+                witness_profile_code="3-of-4",
+                account_aid="AID_EXISTING",
+            )
         )
 
         assert outcome.account_aid == "AID_EXISTING"
@@ -788,11 +832,11 @@ def test_onboarding_service_rejects_alias_collision_with_untracked_local_aid(tmp
     db = _make_db(tmp_path, "kf-onboarding-alias-collision")
     boot_client = FakeBootClient()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -805,7 +849,7 @@ def test_onboarding_service_rejects_alias_collision_with_untracked_local_aid(tmp
         )
 
         with pytest.raises(KFBootError, match="already used by another local identifier"):
-            service.onboard(alias="my account", witness_profile_code="3-of-4")
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
     finally:
         db.close()
 
@@ -818,11 +862,11 @@ def test_onboarding_service_rejects_existing_account_with_different_witness_conf
     witness_registrar = FakeWitnessRegistrar()
     purged_oobis = []
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
@@ -839,10 +883,12 @@ def test_onboarding_service_rejects_existing_account_with_different_witness_conf
         )
 
         with pytest.raises(KFBootError, match="different witness configuration"):
-            service.onboard(
-                alias="selected-account",
-                witness_profile_code="3-of-4",
-                account_aid="AID_EXISTING",
+            _run(
+                service.onboard_async(
+                    alias="selected-account",
+                    witness_profile_code="3-of-4",
+                    account_aid="AID_EXISTING",
+                )
             )
         assert witness_registrar.calls == []
         assert ("cancel", "EPHEMERAL_AID", "SESSION_1", "AID_EXISTING", "client_abandoned") in boot_client.calls
@@ -858,11 +904,11 @@ def test_onboarding_failure_after_completion_preserves_session_and_resumes(tmp_p
     db = _make_db(tmp_path, "kf-onboarding-retry-session")
     boot_client = RetryThenSucceedBootClient()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -876,14 +922,14 @@ def test_onboarding_failure_after_completion_preserves_session_and_resumes(tmp_p
         stub_rotation(service)
 
         with pytest.raises(KFBootError, match="simulated completion failure"):
-            service.onboard(alias="my account", witness_profile_code="3-of-4")
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
 
         record = db.get_account()
         assert record is not None
         record.status = ACCOUNT_STATUS_FAILED
         db.pin_account(record)
 
-        outcome = service.onboard(alias="my account", witness_profile_code="3-of-4")
+        outcome = _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
 
         assert outcome.account_aid == "AID_MY ACCOUNT"
         assert boot_client.start_calls == 1
@@ -899,22 +945,22 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
     db = _make_db(tmp_path, "kf-onboarding-rollback")
     boot_client = FailingCreateAccountBootClient()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.witnesses.provision.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.witnesses.provision.resolve_oobi",
         fake_resolve_oobi,
     )
     monkeypatch.setattr(
         "locksmith.plugins.kerifoundation.witnesses.provision.register_with_witness",
         lambda hab, witness_eid, witness_url, secret=None: {
             "eid": witness_eid,
-            "totp_seed": f"SEED_{witness_eid}",
+            "totp_seed": "JBSWY3DPEHPK3PXP",
             "oobi": f"{witness_url}/oobi/{witness_eid}/controller",
         },
     )
@@ -929,7 +975,7 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
         stub_rotation(service)
 
         with pytest.raises(KFBootError, match="simulated account-create failure"):
-            service.onboard(alias="my account", witness_profile_code="3-of-4")
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
 
         record = db.get_account()
         assert record is not None
@@ -946,16 +992,115 @@ def test_onboarding_failure_after_account_create_preserves_local_state_for_resum
         db.close()
 
 
+def test_onboarding_status_failure_preserves_non_discardable_saved_session(tmp_path):
+    account = FakeHab(
+        name="my account",
+        pre="AID_EXISTING",
+        wits=["WIT_1", "WIT_2", "WIT_3", "WIT_4"],
+        toad=3,
+    )
+    auth = FakeHab(
+        name="kf-auth-existing",
+        pre="EPHEMERAL_AID",
+        ns=ONBOARDING_AUTH_NAMESPACE,
+    )
+    app = FakeApp(habs=[account, auth])
+    db = _make_db(tmp_path, "kf-onboarding-status-failure")
+    boot_client = FailingSessionStatusBootClient()
+
+    try:
+        db.pin_account(
+            KFAccountRecord(
+                account_aid=account.pre,
+                account_alias=account.name,
+                status=ACCOUNT_STATUS_FAILED,
+                witness_profile_code="3-of-4",
+                witness_count=4,
+                toad=3,
+                onboarding_session_id="SESSION_SAVED",
+                onboarding_auth_alias=auth.name,
+                boot_server_aid="BOOT_SERVER_AID",
+            )
+        )
+        service = KFOnboardingService(
+            app=app,
+            db=db,
+            boot_client=boot_client,
+            witness_registrar=FakeWitnessRegistrar(),
+        )
+
+        with pytest.raises(KFBootError, match="session status unavailable"):
+            _run(
+                service.onboard_async(
+                    alias=account.name,
+                    witness_profile_code="3-of-4",
+                )
+            )
+
+        record = db.get_account()
+        assert record is not None
+        assert record.account_aid == account.pre
+        assert record.onboarding_session_id == "SESSION_SAVED"
+        assert record.onboarding_auth_alias == auth.name
+        assert app.vault.hby.habByName(auth.name, ns=ONBOARDING_AUTH_NAMESPACE) is auth
+        assert app.vault.hby.deleted_habs == []
+        assert boot_client.calls == [
+            ("bootstrap",),
+            ("status", auth.pre, "SESSION_SAVED"),
+        ]
+    finally:
+        db.close()
+
+
+def test_onboarding_cancellation_after_session_start_cancels_remote_session(tmp_path):
+    app = FakeApp()
+    db = _make_db(tmp_path, "kf-onboarding-cancel-after-start")
+    started = threading.Event()
+    release = threading.Event()
+    boot_client = BlockingStartBootClient(started=started, release=release)
+    service = KFOnboardingService(
+        app=app,
+        db=db,
+        boot_client=boot_client,
+        witness_registrar=FakeWitnessRegistrar(),
+    )
+
+    async def run_cancelled():
+        task = asyncio.create_task(
+            service.onboard_async(alias="my account", witness_profile_code="3-of-4")
+        )
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        _run(run_cancelled())
+
+        record = db.get_account()
+        assert record is not None
+        assert record.onboarding_session_id == ""
+        assert record.onboarding_auth_alias == ""
+        assert record.account_aid == ""
+        assert ("cancel", "EPHEMERAL_AID", "SESSION_1", "AID_MY ACCOUNT", "client_abandoned") in boot_client.calls
+        assert app.vault.hby.deleted_habs
+    finally:
+        release.set()
+        db.close()
+
+
 def test_onboarding_rejects_allocations_that_do_not_match_requested_profile(tmp_path, monkeypatch):
     app = FakeApp()
     db = _make_db(tmp_path, "kf-onboarding-topology")
     boot_client = WrongTopologyBootClient()
 
-    def fake_resolve_oobi(*args, **kwa):
+    async def fake_resolve_oobi(*args, **kwa):
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve_oobi,
     )
 
@@ -969,7 +1114,7 @@ def test_onboarding_rejects_allocations_that_do_not_match_requested_profile(tmp_
         stub_rotation(service)
 
         with pytest.raises(KFBootError, match="witness profile"):
-            service.onboard(alias="my account", witness_profile_code="3-of-4")
+            _run(service.onboard_async(alias="my account", witness_profile_code="3-of-4"))
     finally:
         db.close()
 
@@ -990,6 +1135,24 @@ def test_load_kf_surfaces_uses_local_dev_defaults(monkeypatch):
     assert surfaces.account_url == "http://127.0.0.1:9723/account"
     assert surfaces.bootstrap_url == "http://127.0.0.1:9723/bootstrap/config"
     assert surfaces.health_url == "http://127.0.0.1:9723/health"
+
+
+def test_load_witness_servers_uses_local_dev_defaults(monkeypatch):
+    app = SimpleNamespace(
+        config=SimpleNamespace(environment=SimpleNamespace(value="development"))
+    )
+
+    for index in range(1, 5):
+        monkeypatch.delenv(f"KF_DEV_WITNESS_URL_{index}", raising=False)
+        monkeypatch.delenv(f"KF_DEV_BOOT_URL_{index}", raising=False)
+        monkeypatch.delenv(f"KF_DEV_REGION_{index}", raising=False)
+        monkeypatch.delenv(f"KF_DEV_LABEL_{index}", raising=False)
+    monkeypatch.delenv("KF_DEV_WITNESS_URL", raising=False)
+    monkeypatch.delenv("KF_DEV_BOOT_URL", raising=False)
+
+    servers = load_witness_servers(app)
+
+    assert servers == DEFAULT_DEV_WITNESS_SERVERS
 
 
 def test_load_kf_surfaces_rejects_unknown_environment():
@@ -1020,7 +1183,7 @@ def test_build_witness_auths_rejects_missing_auth_material(tmp_path):
         service._db.close()
 
 
-def test_resolve_watcher_oobi_uses_blocking_hio_helper(monkeypatch, tmp_path):
+def test_resolve_watcher_oobi_uses_async_resolver(monkeypatch, tmp_path):
     service = KFOnboardingService(
         app=FakeApp(),
         db=_make_db(tmp_path, "kf-onboarding-watcher-oobi"),
@@ -1029,24 +1192,26 @@ def test_resolve_watcher_oobi_uses_blocking_hio_helper(monkeypatch, tmp_path):
     )
     calls = []
 
-    def fake_resolve(*args, **kwa):
+    async def fake_resolve(*args, **kwa):
         calls.append((args, kwa))
         return True
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi_blocking",
+        "locksmith.plugins.kerifoundation.onboarding.service.resolve_oobi",
         fake_resolve,
     )
 
     try:
-        service._resolve_watcher_oobi(
-            account_hab=FakeHab(name="acct", pre="AID_ACCOUNT"),
-            watcher=HostedWatcherAllocation(
-                eid="WAT_1",
-                url="https://watch.example",
-                oobi="https://watch.example/oobi/WAT_1/controller",
-                name="Watcher One",
-            ),
+        _run(
+            service._resolve_watcher_oobi_async(
+                account_hab=FakeHab(name="acct", pre="AID_ACCOUNT"),
+                watcher=HostedWatcherAllocation(
+                    eid="WAT_1",
+                    url="https://watch.example",
+                    oobi="https://watch.example/oobi/WAT_1/controller",
+                    name="Watcher One",
+                ),
+            )
         )
 
         assert calls == [
@@ -1134,7 +1299,7 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
         batch_mode=True,
     )
     try:
-        service._rotate_account_to_allocated_witnesses(
+        service._rotate_account_to_allocated_witnesses_blocking(
             hab=hab,
             registration=registration,
             allocated_witness_eids=["WIT_1", "WIT_2"],

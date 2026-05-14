@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import pyotp
-from PySide6.QtCore import Signal, Qt, QThread, QObject
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QButtonGroup, QFrame,
@@ -31,7 +31,6 @@ from locksmith.core.remoting import (
     describe_oobi_resolution_state,
     purge_oobi_resolution_state,
     resolve_oobi,
-    resolve_oobi_blocking,
 )
 from locksmith.plugins.kerifoundation.core.configing import load_witness_servers
 from locksmith.plugins.kerifoundation.core.remoting import (
@@ -58,6 +57,27 @@ from locksmith.ui.toolkit.widgets.panels import FlowLayout, LocksmithQRPanel
 from locksmith.plugins.kerifoundation.witnesses.widgets import WitnessServerCard
 
 logger = help.ogler.getLogger(__name__)
+
+
+async def _await_blocking_result(func, /, *args, on_cancel_result=None, **kwa):
+    """Run blocking work without losing cancellation-side effects.
+
+    Started thread work is shielded from cancellation. If it finishes after
+    this coroutine is cancelled, the late result is handed to
+    on_cancel_result before cancellation is re-raised.
+    """
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwa))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancel:
+        try:
+            result = await task
+        except Exception:
+            logger.warning("Background witness operation failed after cancellation", exc_info=True)
+            raise asyncio.CancelledError from cancel
+        if on_cancel_result is not None:
+            on_cancel_result(result)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +217,43 @@ def remove_persisted_registration_state(db, hab_pre, persisted_state):
         )
 
 
-def rollback_registration_state(app, db, hab_pre, provisioned_entries, persisted_state, resolved_eids):
+def _hosted_registration_result(witness, reg):
+    oobi = reg.get("oobi") or witness.oobi
+    return {
+        "eid": witness.eid,
+        "totp_seed": reg["totp_seed"],
+        "oobi": oobi,
+        "boot_url": witness.boot_url,
+        "witness_url": witness.witness_url,
+        "name": witness.name,
+    }
+
+
+async def _deprovision_witness_observed(eid: str, boot_url: str) -> bool:
+    completed = False
+
+    def remember_result(result):
+        nonlocal completed
+        completed = bool(result)
+
+    try:
+        return bool(await _await_blocking_result(
+            deprovision_witness,
+            eid,
+            boot_url,
+            on_cancel_result=remember_result,
+        ))
+    except asyncio.CancelledError:
+        if not completed:
+            logger.warning(
+                "Witness deprovision did not finish before cancellation for %s via %s",
+                eid,
+                boot_url,
+            )
+        return completed
+
+
+async def rollback_registration_state(app, db, hab_pre, provisioned_entries, persisted_state, resolved_eids):
     if app and hasattr(app, "vault") and app.vault:
         for eid in resolved_eids:
             try:
@@ -220,7 +276,7 @@ def rollback_registration_state(app, db, hab_pre, provisioned_entries, persisted
             rollback_failures.append(entry)
             continue
 
-        ok = deprovision_witness(entry["eid"], boot_url)
+        ok = await _deprovision_witness_observed(entry["eid"], boot_url)
         if not ok:
             logger.error(
                 "Witness rollback deprovision failed for %s via %s",
@@ -312,41 +368,36 @@ class HostedWitnessRegistrar:
         self._app = app
         self._db = db
 
-    def register(self, *, hab, witnesses: list[HostedWitnessAllocation], batch_mode=True, persist=True):
+    async def register(self, *, hab, witnesses: list[HostedWitnessAllocation], batch_mode=True, persist=True):
         if not witnesses:
             return HostedWitnessRegistration(results=[], batch_mode=batch_mode)
 
         secret = pyotp.random_base32() if batch_mode else None
         results = []
-
-        for witness in witnesses:
-            reg = register_with_witness(
-                hab,
-                witness.eid,
-                witness.witness_url,
-                secret=secret,
-            )
-            oobi = reg.get("oobi") or witness.oobi
-            results.append(
-                {
-                    "eid": witness.eid,
-                    "totp_seed": reg["totp_seed"],
-                    "oobi": oobi,
-                    "boot_url": witness.boot_url,
-                    "witness_url": witness.witness_url,
-                    "name": witness.name,
-                }
-            )
-
         rollback_db = self._db if persist else None
-        if persist:
-            persist_provisioned_witnesses(self._db, hab.pre, results)
         persisted_state = None
         resolved_eids = []
 
         try:
+            for witness in witnesses:
+                def remember_cancelled_registration(reg, witness=witness):
+                    results.append(_hosted_registration_result(witness, reg))
+
+                reg = await _await_blocking_result(
+                    register_with_witness,
+                    hab,
+                    witness.eid,
+                    witness.witness_url,
+                    secret=secret,
+                    on_cancel_result=remember_cancelled_registration,
+                )
+                results.append(_hosted_registration_result(witness, reg))
+
+            if persist:
+                persist_provisioned_witnesses(self._db, hab.pre, results)
+
             for res in results:
-                success = resolve_oobi_blocking(
+                success = await resolve_oobi(
                     self._app,
                     pre=res["eid"],
                     oobi=res["oobi"],
@@ -369,9 +420,20 @@ class HostedWitnessRegistrar:
                     results,
                     batch_mode,
                 )
+        except asyncio.CancelledError:
+            logger.info("Hosted witness registration cancelled for account %s", hab.pre)
+            await rollback_registration_state(
+                self._app,
+                rollback_db,
+                hab.pre,
+                results,
+                persisted_state,
+                resolved_eids,
+            )
+            raise
         except Exception as exc:
             logger.exception("Hosted witness registration failed for account %s", hab.pre)
-            rollback_failures, persisted_failures, persistence_failures = rollback_registration_state(
+            rollback_failures, persisted_failures, persistence_failures = await rollback_registration_state(
                 self._app,
                 rollback_db,
                 hab.pre,
@@ -390,90 +452,6 @@ class HostedWitnessRegistrar:
             raise
 
         return HostedWitnessRegistration(results=results, batch_mode=batch_mode)
-
-
-# ---------------------------------------------------------------------------
-# Background worker
-# ---------------------------------------------------------------------------
-
-class _ProvisionRegisterWorker(QObject):
-    """Provisions and registers witnesses in a background thread.
-
-    On failure the worker deprovisionsALL witnesses created during
-    this run before emitting the ``finished`` signal.
-    """
-
-    progress = Signal(str, int, int)      # (phase_label, current, total)
-    finished = Signal(list, str, list)    # (results, error, rollback_failures)
-
-    def __init__(self, hab_pre, hab, servers, secret=None):
-        super().__init__()
-        self._hab_pre = hab_pre
-        self._hab = hab
-        self._servers = servers           # list of WitnessServerConfig
-        self._secret = secret
-        self._provisioned = []            # [{eid, oobi, boot_url, witness_url}, ...]
-
-    def run(self):
-        total = len(self._servers)
-        results = []
-
-        try:
-            # Phase 1 — Provision
-            for i, server in enumerate(self._servers):
-                self.progress.emit(
-                    f"Provisioning witness {i + 1}/{total}...",
-                    i, total * 2,
-                )
-                prov = provision_witness(self._hab_pre, server.boot_url)
-                self._provisioned.append({
-                    "eid": prov["eid"],
-                    "oobi": prov["oobi"],
-                    "boot_url": server.boot_url,
-                    "witness_url": server.witness_url,
-                })
-
-            # Phase 2 — Register
-            for i, entry in enumerate(self._provisioned):
-                self.progress.emit(
-                    f"Registering with witness {i + 1}/{total}...",
-                    total + i, total * 2,
-                )
-                reg = register_with_witness(
-                    self._hab,
-                    entry["eid"],
-                    entry["witness_url"],
-                    secret=self._secret,
-                )
-                # OOBI fallback: prefer service-returned OOBI
-                oobi = reg.get("oobi") or entry["oobi"]
-                results.append({
-                    "eid": entry["eid"],
-                    "totp_seed": reg["totp_seed"],
-                    "oobi": oobi,
-                    "boot_url": entry["boot_url"],
-                    "witness_url": entry["witness_url"],
-                })
-
-            self.finished.emit(results, "", [])
-
-        except Exception as exc:
-            logger.exception("Provision-and-register failed")
-            rollback_failures = self._rollback()
-            self.finished.emit(results, str(exc), rollback_failures)
-
-    def _rollback(self):
-        """Deprovision every witness created during this run.
-
-        Returns a list of witness entries that could NOT be
-        deprovisioned (best-effort).
-        """
-        failures = []
-        for entry in self._provisioned:
-            ok = deprovision_witness(entry["eid"], entry["boot_url"])
-            if not ok:
-                failures.append(entry.copy())
-        return failures
 
 
 # ---------------------------------------------------------------------------
@@ -496,8 +474,7 @@ class WitnessProvisionPage(LocksmithFormPage):
         self._db = None
         self._hab_pre = None
         self._server_cards: list[WitnessServerCard] = []
-        self._worker = None
-        self._thread = None
+        self._provision_task: asyncio.Task | None = None
         self._reg_hab = None
         self._reg_batch_mode = False
         self._provisioned_in_run: list[dict] = []   # for main-thread rollback
@@ -510,9 +487,13 @@ class WitnessProvisionPage(LocksmithFormPage):
         self._app = app
 
     def set_db(self, db):
+        if db is not self._db:
+            self.shutdown()
         self._db = db
 
     def set_identifier(self, hab_pre: str):
+        if hab_pre != self._hab_pre:
+            self.shutdown()
         self._hab_pre = hab_pre
 
     # ------------------------------------------------------------------
@@ -752,8 +733,8 @@ class WitnessProvisionPage(LocksmithFormPage):
 
         for server in servers:
             card = WitnessServerCard(server)
-            witness_url = self._normalize_url(server.witness_url)
-            boot_url = self._normalize_url(server.boot_url)
+            witness_url = normalize_url(server.witness_url)
+            boot_url = normalize_url(server.boot_url)
 
             if witness_url in registered_urls:
                 if boot_url in pending_boot_urls:
@@ -809,6 +790,9 @@ class WitnessProvisionPage(LocksmithFormPage):
         self.clear_error()
         self.clear_success()
 
+        if self._provision_task is not None and not self._provision_task.done():
+            return
+
         if not self._app or not self._app.vault:
             self.show_error("No vault open.")
             return
@@ -840,41 +824,224 @@ class WitnessProvisionPage(LocksmithFormPage):
         self._reg_hab = hab
         self._reg_batch_mode = batch_mode
 
-        self._thread = QThread()
-        self._worker = _ProvisionRegisterWorker(
-            self._hab_pre, hab, selected, secret=secret,
+        self._provision_task = asyncio.create_task(
+            self._run_provision_registration(
+                hab_pre=self._hab_pre,
+                hab=hab,
+                servers=selected,
+                secret=secret,
+                db=self._db,
+                vault=getattr(self._app, "vault", None),
+            )
         )
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.finished.connect(self._thread.quit)
-        self._thread.finished.connect(self._on_thread_finished)
-        self._thread.start()
 
     def _set_cards_enabled(self, enabled):
         for card in self._server_cards:
             card.set_interactive(enabled)
 
-    def _on_progress(self, label, current, total):
-        self._status_label.setText(label)
+    async def _run_provision_registration(self, *, hab_pre, hab, servers, secret, db, vault):
+        task = asyncio.current_task()
+        total = len(servers)
+        provisioned = []
+        results = []
 
-    def _on_finished(self, results, error, rollback_failures):
-        if error:
-            self._handle_error(error, results, rollback_failures)
+        try:
+            if not self._is_current_provision_task(task, db, vault, hab_pre):
+                self._finish_provision_task(task)
+                return
+
+            await self._provision_selected_servers(
+                hab_pre=hab_pre,
+                servers=servers,
+                provisioned=provisioned,
+                db=db,
+                vault=vault,
+                owner_task=task,
+            )
+
+            for i, entry in enumerate(provisioned):
+                if not self._is_current_provision_task(task, db, vault, hab_pre):
+                    await self._rollback_abandoned_provisioned_entries(provisioned, db=db, hab_pre=hab_pre)
+                    self._finish_provision_task(task)
+                    return
+                self._status_label.setText(f"Registering with witness {i + 1}/{total}...")
+                reg = await _await_blocking_result(
+                    register_with_witness,
+                    hab,
+                    entry["eid"],
+                    entry["witness_url"],
+                    secret=secret,
+                )
+                oobi = reg.get("oobi") or entry["oobi"]
+                results.append({
+                    "eid": entry["eid"],
+                    "totp_seed": reg["totp_seed"],
+                    "oobi": oobi,
+                    "boot_url": entry["boot_url"],
+                    "witness_url": entry["witness_url"],
+                })
+        except asyncio.CancelledError:
+            await self._rollback_abandoned_provisioned_entries(provisioned, db=db, hab_pre=hab_pre)
+            self._finish_provision_task(task)
+            raise
+        except Exception as exc:
+            logger.exception("Provision-and-register failed")
+            rollback_failures = await self._rollback_provisioned_entries(provisioned)
+            if self._is_current_provision_task(task, db, vault, hab_pre):
+                self._handle_error(str(exc), results, rollback_failures)
+            else:
+                self._persist_provision_recovery_state(db, hab_pre, rollback_failures)
+            self._finish_provision_task(task)
             return
 
-        # Track provisioned entries for potential main-thread rollback
+        if not self._is_current_provision_task(task, db, vault, hab_pre):
+            await self._rollback_abandoned_provisioned_entries(provisioned, db=db, hab_pre=hab_pre)
+            self._finish_provision_task(task)
+            return
+
         self._provisioned_in_run = [
             {"eid": r["eid"], "boot_url": r["boot_url"], "witness_url": r["witness_url"]}
             for r in results
         ]
-
-        # Persist ProvisionedWitnessRecord immediately (before OOBI resolution)
         self._persist_provisioned_witnesses(results)
 
         self._status_label.setText("Resolving witness OOBIs...")
-        asyncio.ensure_future(self._finalize_registration(results))
+        await self._finalize_registration(results)
+        self._finish_provision_task(task)
+
+    async def _provision_selected_servers(
+        self,
+        *,
+        hab_pre,
+        servers,
+        provisioned,
+        db,
+        vault,
+        owner_task,
+    ):
+        total = len(servers)
+        entries_by_index = {}
+        task_servers = {}
+
+        def sync_provisioned():
+            provisioned[:] = [
+                entries_by_index[index]
+                for index in sorted(entries_by_index)
+            ]
+
+        self._status_label.setText(f"Provisioning {total} witness(es)...")
+        for index, server in enumerate(servers):
+            provision_task = asyncio.create_task(
+                asyncio.to_thread(provision_witness, hab_pre, server.boot_url)
+            )
+            task_servers[provision_task] = (index, server)
+
+        try:
+            pending = set(task_servers)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for completed_task in done:
+                    index, server = task_servers[completed_task]
+                    prov = completed_task.result()
+                    entries_by_index[index] = {
+                        "eid": prov["eid"],
+                        "oobi": prov["oobi"],
+                        "boot_url": server.boot_url,
+                        "witness_url": server.witness_url,
+                    }
+
+                sync_provisioned()
+                if not self._is_current_provision_task(owner_task, db, vault, hab_pre):
+                    await self._remember_finished_provisions(
+                        task_servers,
+                        entries_by_index,
+                    )
+                    sync_provisioned()
+                    return
+
+                self._status_label.setText(
+                    f"Provisioned {len(entries_by_index)}/{total} witnesses..."
+                )
+        except asyncio.CancelledError:
+            await self._remember_finished_provisions(task_servers, entries_by_index)
+            sync_provisioned()
+            raise
+        except Exception:
+            await self._remember_finished_provisions(task_servers, entries_by_index)
+            sync_provisioned()
+            raise
+
+        provisioned[:] = [entries_by_index[index] for index in range(total)]
+
+    @staticmethod
+    async def _remember_finished_provisions(task_servers, entries_by_index):
+        if not task_servers:
+            return
+
+        task_list = list(task_servers)
+        results = await asyncio.gather(*task_list, return_exceptions=True)
+        for provision_task, result in zip(task_list, results):
+            index, server = task_servers[provision_task]
+            if index in entries_by_index:
+                continue
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Witness provisioning task did not complete cleanly",
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+                continue
+            entries_by_index[index] = {
+                "eid": result["eid"],
+                "oobi": result["oobi"],
+                "boot_url": server.boot_url,
+                "witness_url": server.witness_url,
+            }
+
+    async def _rollback_provisioned_entries(self, entries):
+        failures = []
+        for entry in entries:
+            ok = await _deprovision_witness_observed(entry["eid"], entry["boot_url"])
+            if not ok:
+                failures.append(entry.copy())
+        return failures
+
+    async def _rollback_abandoned_provisioned_entries(self, entries, *, db, hab_pre):
+        if not entries:
+            return
+        failures = await self._rollback_provisioned_entries(entries)
+        self._persist_provision_recovery_state(db, hab_pre, failures)
+        entries.clear()
+
+    @staticmethod
+    def _persist_provision_recovery_state(db, hab_pre, entries):
+        if not entries:
+            return
+        persisted, failures = persist_provisioned_witnesses(db, hab_pre, entries)
+        if failures:
+            logger.error(
+                "Could not save recovery state for %d provisioned witness(es) after task shutdown",
+                len(failures),
+            )
+        if persisted:
+            logger.warning(
+                "Saved %d provisioned witness(es) as pending after task shutdown",
+                len(persisted),
+            )
+
+    def _is_current_provision_task(self, task, db, vault, hab_pre) -> bool:
+        return (
+            task is self._provision_task
+            and db is self._db
+            and vault is getattr(self._app, "vault", None)
+            and hab_pre == self._hab_pre
+        )
+
+    def _finish_provision_task(self, task):
+        if task is self._provision_task:
+            self._provision_task = None
 
     def _handle_error(self, error, results, rollback_failures):
         """Handle failure — clean up local DB and show appropriate message."""
@@ -885,17 +1052,17 @@ class WitnessProvisionPage(LocksmithFormPage):
         if rollback_failures:
             persisted_failures, persistence_failures = self._persist_provisioned_witnesses(
                 rollback_failures
-            )
+        )
 
         if persisted_failures:
-            failed_list = self._format_eid_list(persisted_failures)
+            failed_list = format_eid_list(persisted_failures)
             message += (
                 f"\n\nCould not deprovision {len(persisted_failures)} witness(es): "
                 f"{failed_list}. These witnesses remain provisioned and were saved as pending."
             )
 
         if persistence_failures:
-            failed_list = self._format_eid_list(persistence_failures)
+            failed_list = format_eid_list(persistence_failures)
             message += (
                 f"\n\nCould not save recovery state for {len(persistence_failures)} "
                 f"witness(es): {failed_list}. Cleanup is partial; you may need to "
@@ -988,7 +1155,7 @@ class WitnessProvisionPage(LocksmithFormPage):
         # Deprovision all witnesses on servers (best-effort)
         rollback_failures = []
         for entry in self._provisioned_in_run:
-            ok = deprovision_witness(entry["eid"], entry["boot_url"])
+            ok = await _deprovision_witness_observed(entry["eid"], entry["boot_url"])
             if not ok:
                 rollback_failures.append(entry)
 
@@ -1012,7 +1179,7 @@ class WitnessProvisionPage(LocksmithFormPage):
             persistence_failures = rollback_failures
 
         if rollback_failures:
-            failed_list = self._format_eid_list(rollback_failures)
+            failed_list = format_eid_list(rollback_failures)
             logger.warning(
                 f"Could not deprovision {len(rollback_failures)} witnesses during rollback: "
                 f"{failed_list}"
@@ -1020,13 +1187,13 @@ class WitnessProvisionPage(LocksmithFormPage):
 
         messages = []
         if persisted_failures:
-            failed_list = self._format_eid_list(persisted_failures)
+            failed_list = format_eid_list(persisted_failures)
             messages.append(
                 f"Could not deprovision {len(persisted_failures)} witness(es): {failed_list}. "
                 "These witnesses remain provisioned and were saved as pending."
             )
         if persistence_failures:
-            failed_list = self._format_eid_list(persistence_failures)
+            failed_list = format_eid_list(persistence_failures)
             messages.append(
                 f"Could not save recovery state for {len(persistence_failures)} "
                 f"witness(es): {failed_list}. Cleanup is partial; you may need to "
@@ -1050,7 +1217,7 @@ class WitnessProvisionPage(LocksmithFormPage):
         for res in results:
             record = WitnessRecord(
                 eid=res["eid"],
-                url=self._extract_base_url(res["oobi"]) or res.get("witness_url", ""),
+                url=extract_base_url(res["oobi"]) or res.get("witness_url", ""),
                 oobi=res["oobi"],
                 totp_seed=res["totp_seed"],
                 hab_pre=hab.pre,
@@ -1171,9 +1338,9 @@ class WitnessProvisionPage(LocksmithFormPage):
 
         try:
             for _, record in self._db.witnesses.getTopItemIter(keys=(self._hab_pre,)):
-                registered_url = self._normalize_url(record.url)
+                registered_url = normalize_url(record.url)
                 if not registered_url and record.oobi:
-                    registered_url = self._extract_base_url(record.oobi)
+                    registered_url = extract_base_url(record.oobi)
                 if registered_url:
                     registered_urls.add(registered_url)
         except Exception:
@@ -1181,7 +1348,7 @@ class WitnessProvisionPage(LocksmithFormPage):
 
         try:
             for _, record in self._db.provisionedWitnesses.getTopItemIter(keys=(self._hab_pre,)):
-                boot_url = self._normalize_url(record.boot_url)
+                boot_url = normalize_url(record.boot_url)
                 if boot_url:
                     pending_boot_urls.add(boot_url)
         except Exception:
@@ -1259,10 +1426,6 @@ class WitnessProvisionPage(LocksmithFormPage):
                 exc_info=True,
             )
 
-    @staticmethod
-    def _format_eid_list(entries):
-        return ", ".join(entry["eid"][:12] + "..." for entry in entries)
-
     def _re_enable_form(self):
         self._action_btn.setEnabled(any(card.is_available() for card in self._server_cards))
         self._back_btn.setEnabled(True)
@@ -1271,27 +1434,13 @@ class WitnessProvisionPage(LocksmithFormPage):
         self._batch_panel.setEnabled(True)
         self._individual_panel.setEnabled(True)
 
-    def _on_thread_finished(self):
-        if self._worker is not None:
-            self._worker.deleteLater()
-        if self._thread is not None:
-            self._thread.deleteLater()
-        self._worker = None
-        self._thread = None
-
-    @staticmethod
-    def _extract_base_url(oobi):
-        return WitnessProvisionPage._normalize_url(oobi)
-
-    @staticmethod
-    def _normalize_url(url):
-        try:
-            parsed = urlparse(url)
-            if not parsed.scheme or not parsed.hostname:
-                return ""
-            base = f"{parsed.scheme}://{parsed.hostname}"
-            if parsed.port:
-                base += f":{parsed.port}"
-            return base
-        except Exception:
-            return ""
+    def shutdown(self):
+        task = self._provision_task
+        if task is not None and not task.done():
+            task.cancel()
+            loop = task.get_loop()
+            if not loop.is_running():
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            return False
+        self._provision_task = None
+        return True

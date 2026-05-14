@@ -1,12 +1,12 @@
 import os
-import threading
+import asyncio
 import time
+import warnings
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QObject, QThread, Signal
 
 from locksmith.plugins.kerifoundation.db.basing import (
     ACCOUNT_STATUS_FAILED,
@@ -40,6 +40,49 @@ class FakeApp:
     def __init__(self, vault_name="test-vault"):
         self.vault = FakeVault(name=vault_name)
         self.config = SimpleNamespace(environment=SimpleNamespace(value="development"))
+
+
+def _event_loop():
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                return asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                return loop
+
+
+def _drive_async(qapp, predicate, timeout=1.0):
+    loop = _event_loop()
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        loop.run_until_complete(asyncio.sleep(0.01))
+        qapp.processEvents()
+    qapp.processEvents()
+
+
+def _get_setup_page(qapp, plugin, vault):
+    result = {}
+
+    async def get_page():
+        result["value"] = plugin.get_setup_page(vault)
+        await asyncio.sleep(0)
+
+    _event_loop().run_until_complete(get_page())
+    qapp.processEvents()
+    return result["value"]
+
+
+def _confirm_onboarding(qapp, plugin, alias, witness_profile, account_aid):
+    async def confirm():
+        plugin._on_onboarding_confirm(alias, witness_profile, account_aid)
+
+    _event_loop().run_until_complete(confirm())
+    qapp.processEvents()
 
 
 def test_kf_account_record_survives_reload(tmp_path):
@@ -101,7 +144,7 @@ def test_kf_plugin_initializes_pending_account_and_gates_to_onboarding(
     try:
         assert plugin.is_setup_complete(app.vault) is False
 
-        page_key, should_push_menu = plugin.get_setup_page(app.vault)
+        page_key, should_push_menu = _get_setup_page(qapp, plugin, app.vault)
         record = plugin._db.get_account()
 
         assert page_key == "kf_onboarding"
@@ -144,7 +187,7 @@ def test_kf_plugin_allows_normal_menu_after_onboarding(qapp, tmp_path, monkeypat
 
         assert plugin.is_setup_complete(app.vault) is True
 
-        page_key, should_push_menu = plugin.get_setup_page(app.vault)
+        page_key, should_push_menu = _get_setup_page(qapp, plugin, app.vault)
         assert page_key == "kf_witnesses"
         assert should_push_menu is True
     finally:
@@ -194,7 +237,7 @@ def test_kf_plugin_opens_rotate_dialog_after_provision(qapp, monkeypatch):
     }
 
 
-def test_kf_plugin_runs_onboarding_in_background_thread(qapp, tmp_path, monkeypatch):
+def test_kf_plugin_runs_onboarding_as_async_task(qapp, tmp_path, monkeypatch):
     app = FakeApp()
     emitted_events = []
     app.vault.signals = SimpleNamespace(
@@ -210,56 +253,41 @@ def test_kf_plugin_runs_onboarding_in_background_thread(qapp, tmp_path, monkeypa
     plugin._onboarding_page.set_db(db)
     db.ensure_account()
 
-    captured = {"threaded": False, "started": False}
+    captured = {"started": False}
 
-    class FakeWorker(QObject):
-        progress = Signal(object)
-        succeeded = Signal(str, object)
-        failed = Signal(str, str)
-        finished = Signal()
-
-        def __init__(self, *, app, db, boot_client, alias, witness_profile, account_aid):
-            super().__init__()
-            captured["alias"] = alias
-            captured["witness_profile"] = witness_profile
-            captured["account_aid"] = account_aid
-
-        def run(self):
-            captured["started"] = True
-            captured["threaded"] = QThread.currentThread() is not qapp.thread()
-            self.progress.emit({"stage": "bootstrap", "detail": "Loading bootstrap"})
-            record = plugin._db.get_account()
-            record.account_aid = "AID_ACCOUNT"
-            record.account_alias = "test-account"
-            record.status = ACCOUNT_STATUS_ONBOARDED
-            plugin._db.pin_account(record)
-            outcome = SimpleNamespace(
-                account_aid="AID_ACCOUNT",
-                witness_registration=SimpleNamespace(results=[], batch_mode=True),
-            )
-            self.succeeded.emit("test-account", outcome)
-            self.finished.emit()
+    async def fake_onboard_async(self, *, alias, witness_profile_code, account_aid, progress):
+        captured["started"] = True
+        captured["alias"] = alias
+        captured["witness_profile"] = witness_profile_code
+        captured["account_aid"] = account_aid
+        progress(stage="bootstrap", detail="Loading bootstrap")
+        record = self._db.get_account()
+        record.account_aid = "AID_ACCOUNT"
+        record.account_alias = alias
+        record.status = ACCOUNT_STATUS_ONBOARDED
+        self._db.pin_account(record)
+        await asyncio.sleep(0)
+        return SimpleNamespace(
+            account_aid="AID_ACCOUNT",
+            witness_registration=SimpleNamespace(results=[], batch_mode=True),
+        )
 
     monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin._OnboardingWorker",
-        FakeWorker,
+        "locksmith.plugins.kerifoundation.onboarding.service.KFOnboardingService.onboard_async",
+        fake_onboard_async,
     )
 
     try:
-        plugin._on_onboarding_confirm("test-account", "1-of-1", "")
+        _confirm_onboarding(qapp, plugin, "test-account", "1-of-1", "")
         assert plugin._onboarding_page.phase == "in_progress"
 
-        deadline = time.monotonic() + 1.0
-        while plugin._onboarding_thread is not None and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
+        _drive_async(qapp, lambda: plugin._onboarding_task is None)
 
         assert captured["started"] is True
-        assert captured["threaded"] is True
         assert captured["alias"] == "test-account"
         assert captured["witness_profile"] == "1-of-1"
         assert captured["account_aid"] == ""
-        assert plugin._onboarding_thread is None
+        assert plugin._onboarding_task is None
         assert plugin._onboarding_page.phase == "completed"
         assert emitted_events == [
             (
@@ -278,134 +306,162 @@ def test_kf_plugin_ignores_duplicate_onboarding_request(qapp):
     plugin.initialize(app)
 
     calls = []
-    plugin._onboarding_thread = object()
+    loop = _event_loop()
+    plugin._onboarding_task = loop.create_task(asyncio.sleep(60))
     plugin._onboarding_page.begin_run = lambda: calls.append("begin")
 
-    plugin._on_onboarding_confirm("test-account", "1-of-1", "")
+    try:
+        _confirm_onboarding(qapp, plugin, "test-account", "1-of-1", "")
 
-    assert calls == []
-    assert plugin._onboarding_thread is not None
+        assert calls == []
+        assert plugin._onboarding_task is not None
+    finally:
+        plugin._onboarding_task.cancel()
+        loop.run_until_complete(asyncio.gather(plugin._onboarding_task, return_exceptions=True))
+        plugin._finish_onboarding_run()
 
 
-def test_kf_plugin_waits_for_active_onboarding_worker_on_vault_close(qapp, tmp_path, monkeypatch):
+def test_kf_plugin_ignores_stale_onboarding_success_after_vault_switch(
+        qapp, tmp_path, monkeypatch):
+    app = FakeApp(vault_name="first-vault")
+    emitted_events = []
+    app.vault.signals = SimpleNamespace(
+        emit_doer_event=lambda doer_name, event_type, data: emitted_events.append(
+            (doer_name, event_type, data)
+        )
+    )
+    plugin = KeriFoundationPlugin()
+    plugin.initialize(app)
+
+    first_db = KFBaser(name="kf_stale_first", headDirPath=str(tmp_path), reopen=True)
+    second_db = KFBaser(name="kf_stale_second", headDirPath=str(tmp_path), reopen=True)
+    first_db.ensure_account()
+    second_db.ensure_account()
+
+    outcome = SimpleNamespace(
+        account_aid="AID_STALE",
+        witness_registration=SimpleNamespace(results=[], batch_mode=True),
+    )
+
+    async def fake_onboard_async(self, *, alias, witness_profile_code, account_aid, progress):
+        _ = (alias, witness_profile_code, account_aid, progress)
+        app.vault = FakeVault(name="second-vault")
+        plugin._db = second_db
+        await asyncio.sleep(0)
+        return outcome
+
+    monkeypatch.setattr(
+        "locksmith.plugins.kerifoundation.onboarding.service.KFOnboardingService.onboard_async",
+        fake_onboard_async,
+    )
+
+    loop = _event_loop()
+    try:
+        plugin._db = first_db
+        stale_vault = app.vault
+        task = loop.create_task(
+            plugin._run_onboarding(
+                alias="stale-account",
+                witness_profile="1-of-1",
+                account_aid="",
+                db=first_db,
+                boot_client=SimpleNamespace(),
+                vault=stale_vault,
+            )
+        )
+        plugin._onboarding_task = task
+        loop.run_until_complete(task)
+
+        assert emitted_events == []
+        assert plugin._onboarding_page.phase != "completed"
+        assert plugin._onboarding_task is None
+    finally:
+        first_db.close()
+        second_db.close()
+
+
+def test_kf_plugin_async_onboarding_failure_does_not_mark_account_onboarded(qapp, tmp_path, monkeypatch):
     app = FakeApp()
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
 
-    db = KFBaser(name="kf_close_waits_for_worker", headDirPath=str(tmp_path), reopen=True)
+    db = KFBaser(name="kf_async_onboarding_failure", headDirPath=str(tmp_path), reopen=True)
+    plugin._db = db
+    plugin._onboarding_page.set_db(db)
+    record, _ = db.ensure_account()
+    record.status = ACCOUNT_STATUS_PENDING_ONBOARDING
+    db.pin_account(record)
+
+    async def fake_onboard_async(self, *, alias, witness_profile_code, account_aid, progress):
+        progress(stage="session_start", detail="starting")
+        raise RuntimeError("remote complete failed")
+
+    monkeypatch.setattr(
+        "locksmith.plugins.kerifoundation.onboarding.service.KFOnboardingService.onboard_async",
+        fake_onboard_async,
+    )
+
+    try:
+        _confirm_onboarding(qapp, plugin, "test-account", "1-of-1", "")
+        _drive_async(qapp, lambda: plugin._onboarding_task is None)
+
+        updated = db.get_account()
+        assert updated is not None
+        assert updated.status == ACCOUNT_STATUS_FAILED
+        assert updated.status != ACCOUNT_STATUS_ONBOARDED
+        assert "remote complete failed" in plugin._onboarding_page._progress_error
+    finally:
+        db.close()
+
+
+def test_kf_plugin_cancels_active_onboarding_task_on_vault_close(qapp, tmp_path):
+    app = FakeApp()
+    plugin = KeriFoundationPlugin()
+    plugin.initialize(app)
+
+    db = KFBaser(name="kf_close_cancels_task", headDirPath=str(tmp_path), reopen=True)
     plugin._db = db
     plugin._onboarding_page.set_db(db)
     db.ensure_account()
 
-    cancel_seen = threading.Event()
-    release_worker = threading.Event()
-
-    class FakeWorker(QObject):
-        progress = Signal(object)
-        succeeded = Signal(str, object)
-        failed = Signal(str, str)
-        finished = Signal()
-
-        def __init__(self, *, app, db, boot_client, alias, witness_profile, account_aid):
-            super().__init__()
-            _ = (app, db, boot_client, alias, witness_profile, account_aid)
-
-        def request_cancel(self):
-            cancel_seen.set()
-            release_worker.set()
-
-        def run(self):
-            release_worker.wait(timeout=0.5)
-            self.finished.emit()
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin._OnboardingWorker",
-        FakeWorker,
-    )
+    loop = _event_loop()
+    task = loop.create_task(asyncio.sleep(60))
+    plugin._onboarding_task = task
 
     try:
-        plugin._on_onboarding_confirm("test-account", "1-of-1", "")
-        deadline = time.monotonic() + 1.0
-        while plugin._onboarding_thread is None and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-
-        assert plugin._onboarding_thread is not None
-
         plugin.on_vault_closed(app.vault)
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
 
-        assert cancel_seen.is_set()
-        assert plugin._onboarding_thread is None
-        assert plugin._onboarding_worker is None
+        assert task.cancelled()
+        assert plugin._onboarding_task is None
         assert plugin._db is None
     finally:
         db.close()
 
 
-def test_kf_plugin_prepare_vault_deletion_aborts_when_onboarding_worker_does_not_stop(
-        qapp, tmp_path, monkeypatch):
+def test_kf_plugin_prepare_vault_deletion_aborts_when_onboarding_task_active(
+        qapp, tmp_path):
     app = FakeApp()
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
-    plugin.ONBOARDING_SHUTDOWN_TIMEOUT_MS = 10
 
-    db = KFBaser(name="kf_delete_refuses_stuck_worker", headDirPath=str(tmp_path), reopen=True)
+    db = KFBaser(name="kf_delete_refuses_active_task", headDirPath=str(tmp_path), reopen=True)
     plugin._db = db
     plugin._onboarding_page.set_db(db)
     db.ensure_account()
 
-    cancel_seen = threading.Event()
-    worker_started = threading.Event()
-    release_worker = threading.Event()
-
-    class FakeWorker(QObject):
-        progress = Signal(object)
-        succeeded = Signal(str, object)
-        failed = Signal(str, str)
-        finished = Signal()
-
-        def __init__(self, *, app, db, boot_client, alias, witness_profile, account_aid):
-            super().__init__()
-            _ = (app, db, boot_client, alias, witness_profile, account_aid)
-
-        def request_cancel(self):
-            cancel_seen.set()
-
-        def run(self):
-            worker_started.set()
-            release_worker.wait()
-            self.finished.emit()
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin._OnboardingWorker",
-        FakeWorker,
-    )
+    loop = _event_loop()
+    task = loop.create_task(asyncio.sleep(60))
+    plugin._onboarding_task = task
 
     try:
-        plugin._on_onboarding_confirm("test-account", "1-of-1", "")
-        deadline = time.monotonic() + 1.0
-        while not worker_started.is_set() and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-
-        assert worker_started.is_set()
-
         with pytest.raises(KFBootError, match="could not stop promptly"):
             plugin.prepare_vault_deletion(app.vault)
 
-        assert cancel_seen.is_set()
         assert plugin._db is db
-        assert plugin._onboarding_thread is not None
+        assert task.cancelled()
+        assert plugin._onboarding_task is None
     finally:
-        release_worker.set()
-        deadline = time.monotonic() + 1.0
-        while plugin._onboarding_thread is not None and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        if plugin._onboarding_thread is not None:
-            plugin._onboarding_thread.quit()
-            plugin._onboarding_thread.wait(1000)
-            plugin._finish_onboarding_run()
         db.close()
 
 
@@ -430,69 +486,88 @@ def test_kf_plugin_prepare_vault_deletion_aborts_when_page_shutdown_fails(
         db.close()
 
 
-def test_kf_plugin_vault_close_detaches_state_when_onboarding_worker_does_not_stop(
-        qapp, tmp_path, monkeypatch):
+def test_kf_plugin_vault_close_detaches_state_when_onboarding_task_active(
+        qapp, tmp_path):
     app = FakeApp()
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
-    plugin.ONBOARDING_SHUTDOWN_TIMEOUT_MS = 10
 
-    db = KFBaser(name="kf_close_detaches_stuck_worker", headDirPath=str(tmp_path), reopen=True)
+    db = KFBaser(name="kf_close_detaches_active_task", headDirPath=str(tmp_path), reopen=True)
     plugin._db = db
     plugin._onboarding_page.set_db(db)
     db.ensure_account()
 
-    worker_started = threading.Event()
-    release_worker = threading.Event()
-
-    class FakeWorker(QObject):
-        progress = Signal(object)
-        succeeded = Signal(str, object)
-        failed = Signal(str, str)
-        finished = Signal()
-
-        def __init__(self, *, app, db, boot_client, alias, witness_profile, account_aid):
-            super().__init__()
-            _ = (app, db, boot_client, alias, witness_profile, account_aid)
-
-        def request_cancel(self):
-            pass
-
-        def run(self):
-            worker_started.set()
-            release_worker.wait()
-            self.finished.emit()
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin._OnboardingWorker",
-        FakeWorker,
-    )
+    loop = _event_loop()
+    task = loop.create_task(asyncio.sleep(60))
+    plugin._onboarding_task = task
 
     try:
-        plugin._on_onboarding_confirm("test-account", "1-of-1", "")
-        deadline = time.monotonic() + 1.0
-        while not worker_started.is_set() and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-
-        assert worker_started.is_set()
-
         plugin.on_vault_closed(app.vault)
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
 
         assert plugin._db is None
         assert plugin._onboarding_page._db is None
         assert plugin._witness_overview._db is None
         assert plugin._watcher_list._db is None
+        assert task.cancelled()
     finally:
-        release_worker.set()
-        deadline = time.monotonic() + 1.0
-        while plugin._onboarding_thread is not None and time.monotonic() < deadline:
-            qapp.processEvents()
-            time.sleep(0.01)
-        if plugin._onboarding_thread is not None:
-            plugin._onboarding_thread.quit()
-            plugin._onboarding_thread.wait(1000)
-            plugin._finish_onboarding_run()
+        if not task.done():
+            task.cancel()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+
+
+def test_kf_plugin_defers_db_close_until_witness_cleanup_finishes(qapp, tmp_path):
+    app = FakeApp()
+    plugin = KeriFoundationPlugin()
+    plugin.initialize(app)
+
+    db = KFBaser(name="kf_close_defers_witness_cleanup", headDirPath=str(tmp_path), reopen=True)
+    plugin._db = db
+    plugin._witness_provision.set_db(db)
+    db.ensure_account()
+
+    loop = _event_loop()
+    release_cleanup = asyncio.Event()
+
+    async def cleanup_task():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await release_cleanup.wait()
+            raise
+
+    task = loop.create_task(cleanup_task())
+    loop.run_until_complete(asyncio.sleep(0))
+    plugin._witness_provision._provision_task = task
+
+    async def close_and_release():
+        plugin.on_vault_closed(app.vault)
+        await asyncio.sleep(0)
+
+        assert plugin._db is None
+        assert db.opened is True
+        assert task.done() is False
+        assert len(plugin._deferred_db_close_tasks) == 1
+        close_task = next(iter(plugin._deferred_db_close_tasks))
+        assert close_task.done() is False
+
+        release_cleanup.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await close_task
+        await asyncio.sleep(0)
+
+        assert db.opened is False
+        assert plugin._deferred_db_close_tasks == set()
+
+    try:
+        loop.run_until_complete(close_and_release())
+    finally:
+        if not task.done():
+            task.cancel()
+            release_cleanup.set()
+            loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        if db.opened:
+            db.close()
 
 
 def test_kf_plugin_failure_preserves_resumable_session_state(qapp, tmp_path):

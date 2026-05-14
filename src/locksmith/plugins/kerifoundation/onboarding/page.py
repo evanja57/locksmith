@@ -7,6 +7,7 @@ gate, permanent-account AID selection, and progressive onboarding status.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from urllib.parse import urlparse
 
@@ -120,6 +121,7 @@ class KFOnboardingPage(QWidget):
         self._qr_results: list[dict] = []
         self._qr_batch_mode = True
         self._account_aid = ""
+        self._preflight_task: asyncio.Task | None = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._setup_ui()
 
@@ -129,10 +131,13 @@ class KFOnboardingPage(QWidget):
     def set_db(self, db):
         if db is self._db:
             return
+        self.shutdown()
         self._db = db
         self._reset_vault_state()
 
     def set_boot_client(self, boot_client):
+        if boot_client is not self._boot_client:
+            self.shutdown()
         self._boot_client = boot_client
 
     @property
@@ -604,6 +609,23 @@ class KFOnboardingPage(QWidget):
             elif record.witness_profile_code == WITNESS_PROFILE_3_OF_4:
                 self._panel_3of4.setChecked(True)
 
+        if (
+            record.status == ACCOUNT_STATUS_FAILED
+            and not self._run_in_progress
+            and not self._progress_error
+        ):
+            self._progress_message = ""
+            if record.onboarding_session_id and record.onboarding_auth_alias:
+                self._progress_error = (
+                    "Previous onboarding failed after a hosted session was saved. "
+                    "Local progress is preserved. Begin onboarding again to resume the saved session."
+                )
+            else:
+                self._progress_error = (
+                    "Previous onboarding failed before a safe resume point. "
+                    "The attempt was abandoned locally. Review the selections and begin onboarding again."
+                )
+
     def _update_phase(self):
         old_phase = self._phase
         record = self._db.get_account() if self._db else None
@@ -919,24 +941,58 @@ class KFOnboardingPage(QWidget):
             self._apply_phase_visibility()
             return
 
+        if self._preflight_task is not None and not self._preflight_task.done():
+            return
+
+        self._preflight_task = asyncio.create_task(
+            self._refresh_boot_connection_async(
+                boot_client=self._boot_client,
+                db=self._db,
+            )
+        )
+
+    async def _refresh_boot_connection_async(self, *, boot_client, db):
+        task = asyncio.current_task()
         try:
-            self._boot_client.check_health()
-            self._bootstrap = self._boot_client.fetch_bootstrap_config()
+            await asyncio.to_thread(boot_client.check_health)
+            bootstrap = await asyncio.to_thread(boot_client.fetch_bootstrap_config)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            if task is not self._preflight_task or db is not self._db or boot_client is not self._boot_client:
+                return
+            self._boot_connected = False
+            self._bootstrap = None
+            self._boot_error = f"Could not connect to the KF boot surface: {ex}"
+            self._boot_detail = "Retry after the boot server becomes reachable."
+            logger.warning("KF onboarding boot preflight failed: %s", ex)
+        else:
+            if task is not self._preflight_task or db is not self._db or boot_client is not self._boot_client:
+                return
+            self._bootstrap = bootstrap
             self._boot_connected = True
             self._boot_error = ""
             host = self._boot_host_label()
             region = self._bootstrap.region_name or self._bootstrap.region_id or "default region"
             self._boot_detail = f"Connected to {host}. Bootstrap loaded for {region}."
             logger.info("KF onboarding boot preflight succeeded: %s", self._boot_detail)
-        except Exception as ex:
-            self._boot_connected = False
-            self._bootstrap = None
-            self._boot_error = f"Could not connect to the KF boot surface: {ex}"
-            self._boot_detail = "Retry after the boot server becomes reachable."
-            logger.warning("KF onboarding boot preflight failed: %s", ex)
+        finally:
+            if task is self._preflight_task:
+                self._preflight_task = None
 
         self._update_phase()
         self._apply_phase_visibility()
+
+    def shutdown(self):
+        task = self._preflight_task
+        if task is not None and not task.done():
+            task.cancel()
+            loop = task.get_loop()
+            if not loop.is_running():
+                loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+            return False
+        self._preflight_task = None
+        return True
 
     def _on_account_selection_changed(self, _index: int):
         self._update_identity_ui()
