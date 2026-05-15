@@ -1248,6 +1248,8 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
         def __init__(self, hby):
             self.hby = hby
             self.calls = []
+            self.doers = ["clienter", "witDo", "gitDo"]
+            self.removed = []
 
         def wind(self, tymth):
             self.tymth = tymth
@@ -1256,6 +1258,10 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
             self.calls.append((pre, sn, auths))
             if False:
                 yield 0.0
+
+        def remove(self, doers):
+            self.removed.append(list(doers))
+            self.doers = [doer for doer in self.doers if doer not in doers]
 
     fake_receiptor = FakeReceiptor(hby=object())
 
@@ -1311,6 +1317,8 @@ def test_rotate_account_to_allocated_witnesses_rotates_and_receipts(monkeypatch,
         assert fake_receiptor.calls[0][1] == 1
         assert set(fake_receiptor.calls[0][2].keys()) == {"WIT_1", "WIT_2"}
         assert all("#" in value for value in fake_receiptor.calls[0][2].values())
+        assert fake_receiptor.removed == [["clienter", "witDo", "gitDo"]]
+        assert fake_receiptor.doers == []
     finally:
         service._db.close()
 

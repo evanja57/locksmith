@@ -269,6 +269,7 @@ async def resolve_oobi(app, pre: str, oobi: str | None = None, force=False, alia
 
     start_time = helping.nowUTC()
     timeout_delta = datetime.timedelta(seconds=15)
+    poll_interval = 0.125
 
     app.vault.hby.db.oobis.put(keys=(oobi,), val=obr)
 
@@ -276,7 +277,7 @@ async def resolve_oobi(app, pre: str, oobi: str | None = None, force=False, alia
         if helping.nowUTC() > start_time + timeout_delta:
             logger.info(f'OOBI resolve timeout for {alias} ({oobi})')
             return False
-        await asyncio.sleep(1)
+        await asyncio.sleep(poll_interval)
 
     if pre not in app.vault.hby.kevers:
         logger.error(f'OOBI Resolution failed for alias {alias} and OOBI {oobi}, {pre} not found in KERI DB.')

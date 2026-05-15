@@ -1341,8 +1341,11 @@ class KFOnboardingService:
             _ = opts
             receiptor.wind(tymth)
             _ = (yield tock)
-            hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
-            yield from receiptor.receipt(hab.pre, sn=hab.kever.sn, auths=auths)
+            try:
+                hab.rotate(toad=toad, cuts=[], adds=list(allocated_witness_eids))
+                yield from receiptor.receipt(hab.pre, sn=hab.kever.sn, auths=auths)
+            finally:
+                receiptor.remove(list(receiptor.doers))
             return
 
         runner = doing.doify(rotate_and_receipt)
