@@ -950,7 +950,7 @@ class ChallengeVerificationDoer(doing.DoDoer):
             exn, _ = exchanging.exchange(route='/challenge/response', payload=payload, sender=hab.pre)
 
             # Endorse the message
-            ims = hab.endorse(serder=exn, last=False, pipelined=False)
+            ims = hab.endorse(serder=exn, last=False, framed=True)
             del ims[:exn.size]
 
             # Get sender hab (handle group habs)

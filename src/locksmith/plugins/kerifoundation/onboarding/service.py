@@ -394,7 +394,7 @@ class KFBootClient:
             sender=hab.pre,
             recipient=dest or None,
         )
-        ims = hab.endorse(serder=serder, last=False, pipelined=False)
+        ims = hab.endorse(serder=serder, last=False, framed=True)
         attachment = bytearray(ims)
         del attachment[:serder.size]
         if end:
