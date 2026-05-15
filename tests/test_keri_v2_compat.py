@@ -236,6 +236,14 @@ def test_vault_constructs_with_real_keri_v2_stores(monkeypatch, tmp_path):
 
             assert vault.hby is hby
             assert vault.counseling_completion_doers == {}
+            assert vault.pluginSettings is None
+            assert vault.turrent_doer is None
+            assert vault.db.pluginSettings.get(keys=("default",)) is None
+            assert hby.habByName(f"plugin-{hby.name}", ns="settings") is None
+
+            assert vault.update_plugin_identifier("PLUGIN_AID") is None
+            assert vault.db.pluginSettings.get(keys=("default",)) is None
+            assert hby.habByName(f"plugin-{hby.name}", ns="settings") is None
         finally:
             if vault is not None:
                 vault.db.close()

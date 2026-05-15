@@ -28,6 +28,7 @@ from keri.vdr.eventing import Tevery
 from locksmith.core import indirecting, challenging
 from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
 from locksmith.core.credentialing import Registrar
+from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN
 from locksmith.core.grouping import CounselingCompletionDoer
 from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.signals import DoerSignalBridge
@@ -65,7 +66,7 @@ class Vault(doing.DoDoer):
 
         # Browser plugin settings (loaded from db if exists)
         self.pluginSettings: BrowserPluginSettings | None = self.db.pluginSettings.get(keys=("default",))
-        if not self.pluginSettings:
+        if ENABLE_TURRET_BROWSER_PLUGIN and not self.pluginSettings:
             self.pluginSettings = BrowserPluginSettings("", f"plugin-{self.hby.name}", None)
             if (hab := self.hby.habByName(self.pluginSettings.locksmith_alias, ns="settings")) is None:
                 hab = self.hby.makeHab(name=self.pluginSettings.locksmith_alias,
@@ -158,6 +159,11 @@ class Vault(doing.DoDoer):
         # Notification toast doer
         self.toast_doer = NotificationToastDoer(vault=self)
         self.turrent_doer: TurretDoer | None = None
+        if ENABLE_TURRET_BROWSER_PLUGIN and self.pluginSettings is not None:
+            self.turrent_doer = TurretDoer(self.hby,
+                                           self.rgy,
+                                           self.pluginSettings.locksmith_alias,
+                                           self.pluginSettings.plugin_identifier)
 
         # Assemble all doers
         self.doers = [
@@ -175,6 +181,8 @@ class Vault(doing.DoDoer):
             self.mbx,
             self.toast_doer,
         ]
+        if self.turrent_doer is not None:
+            self.doers.append(self.turrent_doer)
         # Initialize DoDoer with always=True to keep running
         super(Vault, self).__init__(doers=self.doers, always=True)
 
@@ -212,11 +220,17 @@ class Vault(doing.DoDoer):
         self.mbx.remove_poller(hab=hab, mailbox=mailbox_eid)
 
     def update_plugin_identifier(self, plugin_identifier):
+        if not ENABLE_TURRET_BROWSER_PLUGIN:
+            return None
+
         settings = self.db.pluginSettings.get(keys=("default",))
+        if settings is None:
+            return None
+
         settings.plugin_identifier = plugin_identifier
         self.db.pluginSettings.pin(keys=("default",), val=settings)
         if self.turrent_doer is None:
-            return
+            return None
 
         self.turrent_doer.set_plugin_identifier(plugin_identifier)
 

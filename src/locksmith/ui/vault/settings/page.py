@@ -16,7 +16,7 @@ from keri import help
 from keri.core import coring
 from keri import kering
 
-from locksmith.core.configing import LocksmithConfig
+from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN, LocksmithConfig
 from locksmith.ui import colors
 from locksmith.ui.styles import get_monospace_font_family
 from locksmith.ui.toolkit.widgets.buttons import LocksmithButton, LocksmithIconButton, LocksmithRadioButton, LocksmithCopyButton
@@ -171,8 +171,8 @@ class SettingsPage(QWidget):
 
         parent_layout.addWidget(settings_container)
 
-        # Add browser plugin section
-        self._create_browser_plugin_section(parent_layout)
+        if ENABLE_TURRET_BROWSER_PLUGIN:
+            self._create_browser_plugin_section(parent_layout)
 
     def _create_browser_plugin_section(self, parent_layout: QVBoxLayout):
         """Create the Browser Plugin Connection section."""
@@ -630,7 +630,7 @@ class SettingsPage(QWidget):
         logger.info(f"SettingsPage: Set vault name to {vault_name}")
 
         # Load existing browser plugin settings if available
-        if self.app and self.app.vault and self.app.vault.pluginSettings:
+        if ENABLE_TURRET_BROWSER_PLUGIN and self.app and self.app.vault and self.app.vault.pluginSettings:
             self.locksmith_id_field.setText(self.app.vault.pluginSettings.locksmith_identifier)
             self.locksmith_copy_button.set_copy_content(self.app.vault.pluginSettings.locksmith_identifier)
             plugin_id = self.app.vault.pluginSettings.plugin_identifier
