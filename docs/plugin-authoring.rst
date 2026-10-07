@@ -165,6 +165,11 @@ database handle, or task from the previous vault must not survive a vault
 switch. Resolve current vault objects in ``on_vault_opened`` and detach them in
 ``on_vault_closed``.
 
+Plugin databases must use the vault's base, storage root and temporary flag,
+not only its display name. The Foundation plugin passes ``hby.base``,
+``hby.db.headDirPath`` and ``hby.temp`` to its database. It removes temporary
+data on close. Persistent data stays until the owning vault is deleted.
+
 Vault deletion adds one important step. Locksmith first calls
 ``prepare_vault_deletion(vault)`` while identifiers and databases are still
 available. A plugin can use that hook to cancel or remove remote resources. If

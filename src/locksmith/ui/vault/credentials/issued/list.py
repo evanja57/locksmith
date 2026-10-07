@@ -6,12 +6,13 @@ Issued credentials list content page (displayed within VaultPage container).
 """
 from typing import Dict, Any, TYPE_CHECKING
 
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 from keri import help
-from keri.app import organizing
-from keri.help import helping
 
+from locksmith.ui import colors
 from locksmith.core import credentialing
+from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name, date_label, status_label
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.issued.delete import DeleteIssuedCredentialDialog
@@ -55,24 +56,23 @@ class IssuedCredentialsListPage(BaseListPage):
         main_layout.setSpacing(0)
 
         # Set background using palette instead of stylesheet for better control
-        from PySide6.QtGui import QPalette, QColor
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor("#F8F9FF"))
+        palette.setColor(QPalette.ColorRole.Window, QColor(colors.BACKGROUND_CONTENT))
         self.setPalette(palette)
         self.setAutoFillBackground(True)
 
         # Create table widget
         self.icon_path = ":/assets/material-icons/out-badge.svg"
         self.table = PaginatedTableWidget(
-            columns=["Schema", "Recipient", "Status", "Issued Date", "Actions"],
-            column_widths={"Schema": 220, "Status": 110, "Issued Date": 165, "Actions": 50},
+            columns=["Credential", "Recipient", "Status", "Created", "Actions"],
+            column_widths={"Credential": 220, "Status": 110, "Created": 165, "Actions": 50},
             title="Issued Credentials",
             icon_path=self.icon_path,
             items_per_page=10,
             show_search=True,
             show_add_button=True,
             add_button_text="Issue Credential",
-            row_actions=["View", "Send", "Revoke", "Delete", "Export", "Grant"],
+            row_actions=["View", "Offer", "Grant", "View exchange history", "Delete"],
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
                 "Send": ":/assets/material-icons/send.svg",
@@ -102,8 +102,6 @@ class IssuedCredentialsListPage(BaseListPage):
         This method is called after a vault is opened and hby is available.
         """
         try:
-            org = organizing.Organizer(hby=self.app.vault.hby)
-
             issued_credentials_data = []
             creds = credentialing.credentials(self.app.vault, received=False)
 
@@ -111,29 +109,14 @@ class IssuedCredentialsListPage(BaseListPage):
                 sad = credential['sad']
                 schemer = credential.get("schema") or {}
                 status = credential.get("status", {})
-                status_text = {
-                    'issued': 'Issued / Active',
-                    'revoked': 'Issued / Revoked',
-                    'pending': 'Pending verification',
-                    'unknown': 'Unknown state',
-                }.get(status['et'], 'Unknown state')
-
-                recp = credential['recipient']
-                recipient_name = f'Unknown ({recp})' if recp else 'Not specified'
-                recipient_hab = self.app.vault.hby.habByPre(recp) if recp else None
-                if recipient_hab is not None:
-                    recipient_name = f'{recipient_hab.name} ({recp})'
-                elif recp and (remote_id := org.get(recp)) is not None:
-                    recipient_name = f'{remote_id['alias']} ({recp})'
-
-                dt = helping.fromIso8601(status['dt']) if status.get('dt') else None
-
+                status_text = status_label(status)
+                recipient_name = identifier_name(self.app.vault, credential['recipient'])
                 cred_dict = {
-                    "Schema": schemer.get("title", ""),
+                    "Credential": credential_name(schemer),
                     "Recipient": recipient_name,
                     "Issuer": sad['i'],
                     "Status": status_text,
-                    "Issued Date": dt.strftime("%b %d, %Y %I:%M %p") if dt else "Unknown",
+                    "Created": date_label(credential['created_at']),
                     "SAID": sad['d']  # Store SAID for view operation
                 }
                 issued_credentials_data.append(cred_dict)
@@ -152,13 +135,17 @@ class IssuedCredentialsListPage(BaseListPage):
 
     def _on_row_action(self, row_data: Dict[str, Any], action: str):
         """Handle row action from skewer menu."""
-        credential_schema = row_data.get('Schema', 'Unknown')
+        credential_schema = row_data.get('Credential', 'Unknown')
         credential_recipient = row_data.get('Recipient', 'Unknown')
         credential_issuer = row_data.get('Issuer', 'Unknown')
         credential_said = row_data.get('SAID', '')
         logger.info(f"Row action '{action}' triggered for: {credential_schema} -> {credential_recipient}")
 
-        if action == "View":
+        if action == "View exchange history":
+            self.parent.show_credential_activity(credential_said, received=False)
+        elif action == "Offer":
+            self.parent.start_credential_exchange('Offer', credential_said=credential_said)
+        elif action == "View":
             # Open view credential dialog
             try:
                 dialog = ViewIssuedCredentialDialog(

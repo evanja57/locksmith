@@ -513,9 +513,9 @@ def ipex_vaults(monkeypatch, tmp_path):
         monkeypatch.setattr(cls, 'HeadDirPath', str(tmp_path))
     sessions = []
 
-    def open_session(name):
-        hby = habbing.Habery(name=name, temp=False, salt='0AAwMTIzNDU2Nzg5YWJjZGVm')
-        rgy = registraring.Regery(hby=hby, name=name, temp=False)
+    def open_session(name, base=''):
+        hby = habbing.Habery(name=name, base=base, temp=False, salt='0AAwMTIzNDU2Nzg5YWJjZGVm')
+        rgy = registraring.Regery(hby=hby, name=name, base=base, temp=False)
         app = apping.LocksmithApplication.__new__(apping.LocksmithApplication)
         app.name, app.hby, app.rgy = name, hby, rgy
         app.plugin_manager = SimpleNamespace(on_vault_closed=lambda *a, **k: None)
@@ -607,7 +607,7 @@ def ipex_mailbox(monkeypatch):
     from keri.core import parsing
     from keri.db import openLMDB
     from keri.peer import exchanging
-    from locksmith.core.ipexing import SendIpexDoer
+    from locksmith.core.ipexing import submit
 
     with habbing.openHab(name='ipex-witness', transferable=False, temp=True,
                          version=kering.Vrsn_2_0) as (hby, witness), \
@@ -630,7 +630,7 @@ def ipex_mailbox(monkeypatch):
         doist = doing.Doist(doers=[http.ServerDoer(server=server)], tock=0.03125)
         doist.enter()
 
-        def forward(sender, receiver, hab, exn, stream):
+        def forward(sender, receiver, hab, exn, stream, queued=False, outcome='transport_submitted'):
             topic = f'{exn.sad["ri"]}/credential'
             before = len(list(mbx.cloneTopicIter(topic=topic)))
             with monkeypatch.context() as patch:
@@ -641,20 +641,20 @@ def ipex_mailbox(monkeypatch):
                 def record(name, kind, data):
                     events.append((kind, data))
                 sender.vault.signals.doer_event.connect(record)
-                delivery = SendIpexDoer(sender.vault, hab, exn, stream[exn.size:])
+                if not queued:
+                    submit(sender.vault, hab, exn, stream[exn.size:])
                 try:
-                    doist.extend([delivery])
                     deadline = monotonic() + 5
-                    while not delivery.done and monotonic() < deadline:
+                    while not any(kind == outcome for kind, _ in events) and monotonic() < deadline:
                         doist.recur()
+                        sender.qtask.run()
                         parser.parse(local=False)
                         hby.kvy.processEscrows()
                         parser.exc.processEscrow()
                         sleep(0.001)
-                    assert delivery.done
-                    assert ('transport_submitted', {'said': exn.said}) in events, events
+                    assert any(kind == outcome and data.get('said') == exn.said
+                               for kind, data in events), events
                 finally:
-                    doist.remove([delivery])
                     sender.vault.signals.doer_event.disconnect(record)
             assert hab.pre in hby.kevers
             rows = list(mbx.cloneTopicIter(topic=topic, fn=before))
@@ -868,23 +868,88 @@ def test_mailbox_accepts_v1_key_events_and_rejects_legacy_ipex(ipex_vaults, gvrs
     assert receiver.vault.notifier.getNoteCnt() == 1
 
 
-def test_native_ipex_submission_without_endpoint_reports_failure(ipex_vaults):
+def test_native_ipex_submission_retries_failed_delivery_across_reopen(
+        ipex_vaults, ipex_mailbox, monkeypatch):
+    from datetime import timedelta
     from keri.acdc import ipexing
-    from locksmith.core.ipexing import SendIpexDoer
+    from keri.help import helping
+    from keri.peer import exchanging
+    from locksmith.core.ipexing import submit
 
     sender, receiver = ipex_vaults('submit-sender'), ipex_vaults('submit-receiver')
     sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='receiver')
     exn, atc = ipexing.apply(sh, rh.pre, 'Submit', modifiers={'dp': [[]]})
     events = []
     sender.vault.signals.doer_event.connect(lambda name, kind, data: events.append(kind))
-    doer = SendIpexDoer(sender.vault, sh, exn, atc)
-    doist = doing.Doist(doers=[doer], tock=0.03125, limit=1.0)
-    doist.do()
-    assert 'send_failed' in events
+    submit(sender.vault, sh, exn, atc)
+    retained = exchanging.serializeMessage(sender.hby, exn.said)
+    now = helping.nowUTC()
+    monkeypatch.setattr(helping, 'nowUTC', lambda: now)
+    for attempt in range(1, 5):
+        for _ in range(64):
+            sender.qtask.run()
+        record = sender.vault.db.outbox.get((exn.said,))
+        assert record.attempts == attempt
+        assert record.status == 'failed'
+        now += timedelta(seconds=29)
+        for _ in range(64):
+            sender.qtask.run()
+        assert sender.vault.db.outbox.get((exn.said,)).attempts == attempt
+        now += timedelta(seconds=2)
+    assert events.count('send_failed') == 4
     assert 'transport_submitted' not in events
     assert _ipex_status(sender.vault, exn.said) == 'protocol_verified'
     assert _ipex_status(receiver.vault, exn.said) == 'unverified'
     assert sender.vault.notifier.getNoteCnt() == 0
+
+    sender.close_vault()
+    sender = ipex_vaults('submit-sender')
+    sh = sender.hby.habByName('sender')
+    for _ in range(64):
+        sender.qtask.run()
+    record = sender.vault.db.outbox.get((exn.said,))
+    assert record.status == 'failed' and record.attempts == 5
+    now += timedelta(seconds=31)
+    ipex_mailbox(sender, receiver, sh, exn, retained, queued=True)
+    record = sender.vault.db.outbox.get((exn.said,))
+    assert record.status == 'submitted' and record.attempts == 6
+    assert receiver.vault.exc.complete(exn.said)
+    assert exchanging.serializeMessage(sender.hby, exn.said) == retained
+    assert sh.kever.sn == 0
+
+
+def test_ipex_outbox_yields_during_history_scan(ipex_vaults):
+    from keri.acdc import ipexing as native
+    from locksmith.core import ipexing
+    from locksmith.db.basing import IpexSubmission
+
+    sender = ipex_vaults('outbox-history')
+    hab = sender.hby.makeHab(name='sender')
+    peer = sender.hby.makeHab(name='peer')
+    outbox = sender.vault.db.outbox
+    # Seed completed history in one transaction. These keys sort before the
+    # real queued message, so delivery must wait until the scan reaches it.
+    with sender.vault.db.env.begin(write=True) as txn:
+        for index in range(2048):
+            txn.put(f'0{index:08}'.encode(), outbox._ser(IpexSubmission(status='submitted')),
+                    db=outbox.sdb)
+    exn, atc = native.apply(hab, peer.pre, 'Apply', modifiers={'dp': [[]]})
+    ipexing.submit(sender.vault, hab, exn, atc)
+    events = []
+    sender.vault.signals.doer_event.connect(lambda *event: events.append(event))
+    # Other vault work must have several turns before history scanning ends.
+    for _ in range(4):
+        sender.qtask.run()
+    assert not events
+    assert outbox.get((exn.said,)).status == 'pending'
+    # Closing during the scan must release its read transaction too.
+    sender.close_vault()
+    sender = ipex_vaults('outbox-history')
+    sender.vault.signals.doer_event.connect(lambda *event: events.append(event))
+    for _ in range(64):
+        sender.qtask.run()
+    assert sender.vault.db.outbox.get((exn.said,)).status == 'failed'
+    assert events[-1][1] == 'send_failed'
 
 
 @pytest.mark.parametrize('delegated', [False, True])
@@ -987,7 +1052,7 @@ def test_expired_ipex_grant_recovers_in_a_fresh_conversation(ipex_vaults, monkey
 def test_native_ipex_submission_timeout_closes_transport(ipex_vaults, monkeypatch):
     from hio.core.http import clienting
     from keri.acdc import ipexing
-    from locksmith.core.ipexing import SendIpexDoer
+    from locksmith.core.ipexing import SendIpexDoer, submit
 
     sender, receiver = ipex_vaults('timeout-sender'), ipex_vaults('timeout-receiver')
     sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='receiver')
@@ -999,7 +1064,8 @@ def test_native_ipex_submission_timeout_closes_transport(ipex_vaults, monkeypatc
     monkeypatch.setattr(clienting.Client, 'service', lambda *a, **k: None)
     events = []
     sender.vault.signals.doer_event.connect(lambda name, kind, data: events.append(kind))
-    doer = SendIpexDoer(sender.vault, sh, exn, atc)
+    submit(sender.vault, sh, exn, atc)
+    doer = SendIpexDoer(sender.vault, exn.said)
     doist = doing.Doist(doers=[doer], tock=0.03125, limit=31.0)
     doist.do()
     assert doer.done is True
@@ -1026,6 +1092,88 @@ def test_native_ipex_cannot_fall_back_to_legacy_validation(ipex_vaults):
     assert _ipex_status(receiver.vault, invalid.said) == 'unverified'
     assert not receiver.vault.exc.complete(invalid.said)
     assert receiver.vault.notifier.getNoteCnt() == 0
+
+
+def test_ipex_close_stops_inflight_delivery_and_reopen_resumes(
+        ipex_vaults, ipex_mailbox, monkeypatch):
+    from hio.core.http import clienting
+    from keri.acdc import ipexing as native
+    from keri.peer import exchanging
+    from locksmith.core import ipexing
+
+    sender, receiver = ipex_vaults('closing-sender'), ipex_vaults('closing-receiver')
+    sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='receiver')
+    exn, atc = native.apply(sh, rh.pre, 'Send', modifiers={'dp': [[]]})
+    ipexing.submit(sender.vault, sh, exn, atc)
+    record = sender.vault.db.outbox.get((exn.said,))
+    record.attempts = 3
+    sender.vault.db.outbox.pin((exn.said,), record)
+    retained = exchanging.serializeMessage(sender.hby, exn.said)
+    old_vault = sender.vault
+    with monkeypatch.context() as patch:
+        patch.setattr(sh, 'endsFor', lambda pre: {
+            kering.Roles.controller: {rh.pre: {'http': 'http://127.0.0.1:9999'}}})
+        patch.setattr(clienting.Client, 'reopen', lambda *a, **k: None)
+        patch.setattr(clienting.Client, 'service', lambda *a, **k: None)
+        for _ in range(20):
+            sender.qtask.run()
+        assert sender.vault.db.outbox.get((exn.said,)).status == 'sending'
+        delivery = next(doer for doer in old_vault.ipex_outbox.doers
+                        if isinstance(doer, ipexing.SendIpexDoer))
+        sender.close_vault()
+    assert old_vault.closed and not old_vault.db.opened
+    assert not delivery.deeds and not old_vault.ipex_outbox.deeds
+    with pytest.raises(ValueError, match='closed'):
+        ipexing.submit(old_vault, sh, exn, atc)
+    sender = ipex_vaults('closing-sender')
+    sh = sender.hby.habByName('sender')
+    assert sender.vault.db.outbox.get((exn.said,)).status == 'pending'
+    ipex_mailbox(sender, receiver, sh, exn, retained, queued=True)
+    assert sender.vault.db.outbox.get((exn.said,)).attempts == 5
+    assert receiver.vault.exc.complete(exn.said)
+    assert exchanging.serializeMessage(sender.hby, exn.said) == retained
+
+
+def test_ipex_outbox_is_scoped_to_vault_base(ipex_vaults):
+    from keri.acdc import ipexing as native
+    from locksmith.core import ipexing
+
+    first, second = ipex_vaults('same-name', base='first'), ipex_vaults('same-name', base='second')
+    one, two = first.hby.makeHab(name='sender'), second.hby.makeHab(name='sender')
+    recipient = first.hby.makeHab(name='recipient')
+    exn, atc = native.apply(one, recipient.pre, 'Send', modifiers={'dp': [[]]})
+    assert first.vault.db.path != second.vault.db.path
+    with pytest.raises(ValueError, match='does not belong'):
+        ipexing.submit(second.vault, one, exn, atc)
+    ipexing.submit(first.vault, one, exn, atc)
+    assert list(second.vault.db.outbox.getTopItemIter()) == []
+    assert second.hby.habByPre(two.pre) is two
+    first.close_vault()
+    first = ipex_vaults('same-name', base='first')
+    assert first.vault.db.outbox.get((exn.said,)).status == 'pending'
+    assert list(second.vault.db.outbox.getTopItemIter()) == []
+
+
+def test_ipex_retry_preserves_valid_sender_seal_after_rotation(ipex_vaults, ipex_mailbox):
+    from keri.acdc import ipexing as native
+    from keri.peer import exchanging
+    from locksmith.core import ipexing
+
+    sender, receiver = ipex_vaults('sealed-sender'), ipex_vaults('sealed-receiver')
+    sh, rh = sender.hby.makeHab(name='sender'), receiver.hby.makeHab(name='receiver')
+    exn, _ = native.apply(sh, rh.pre, 'Apply', modifiers={'dp': [[]]})
+    # This extra authentication seal does not negotiate AX for the reply.
+    signed = native._sign(sh, exn, anchor=True)
+    ipexing.submit(sender.vault, sh, exn, signed[exn.size:])
+    retained = exchanging.serializeMessage(sender.hby, exn.said)
+    sh.rotate()
+    sn = sh.kever.sn
+    ipex_mailbox(sender, receiver, sh, exn, retained, queued=True)
+    assert receiver.hby.kevers[sh.pre].sn == sn
+    assert receiver.vault.exc.complete(exn.said)
+    assert sender.vault.db.outbox.get((exn.said,)).status == 'submitted'
+    assert exchanging.serializeMessage(sender.hby, exn.said) == retained
+    assert sh.kever.sn == sn
 
 
 def test_vault_uses_one_app_owned_kram_policy(ipex_vaults):

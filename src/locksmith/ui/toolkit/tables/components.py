@@ -11,6 +11,8 @@ from PySide6.QtGui import QIcon, QAction
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
+    QVBoxLayout,
+    QSizePolicy,
     QLabel,
     QToolButton,
     QMenu,
@@ -28,7 +30,7 @@ class TableHeader(QWidget):
     """
     Header bar with icon, title, search field, and add button.
 
-    Layout: [Icon] [Title] [---stretch---] [Filter Button] [Search] [Add Button]
+    Search and actions can use a separate row below the title.
     """
 
     search_changed = Signal(str)
@@ -43,7 +45,9 @@ class TableHeader(QWidget):
         show_add_button: bool = True,
         add_button_text: str = "Add",
         filter_func: Optional[callable] = None,
-        parent=None
+        parent=None,
+        *,
+        separate_toolbar: bool = False
     ):
         """
         Initialize the TableHeader.
@@ -56,6 +60,7 @@ class TableHeader(QWidget):
             add_button_text: Text for the add button
             filter_func: Optional callback function to invoke when filter button is clicked
             parent: Parent widget
+            separate_toolbar: Put search and actions below the title for action-heavy pages
         """
         super().__init__(parent)
 
@@ -64,9 +69,19 @@ class TableHeader(QWidget):
         self.filter_func = filter_func
 
         # Create main layout
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self) if separate_toolbar else QHBoxLayout(self)
         layout.setContentsMargins(10, 20, 5, 10)
-        layout.setSpacing(16)
+        layout.setSpacing(12 if separate_toolbar else 16)
+        if separate_toolbar:
+            title_layout = QHBoxLayout()
+            title_layout.setSpacing(16)
+            layout.addLayout(title_layout)
+            self.toolbar_layout = QHBoxLayout()
+            self.toolbar_layout.setSpacing(16)
+            layout.addLayout(self.toolbar_layout)
+        else:
+            title_layout = layout
+            self.toolbar_layout = layout
 
         # Icon (optional)
         if icon_path:
@@ -75,7 +90,7 @@ class TableHeader(QWidget):
                 icon_label = QLabel()
                 icon_label.setPixmap(icon.pixmap(32, 32))
                 icon_label.setFixedSize(32, 32)
-                layout.addWidget(icon_label)
+                title_layout.addWidget(icon_label)
 
         # Title
         title_label = QLabel(title)
@@ -86,10 +101,8 @@ class TableHeader(QWidget):
                 color: {colors.TEXT_PRIMARY};
             }}
         """)
-        layout.addWidget(title_label)
-
-        # Stretch to push search and button to the right
-        layout.addStretch()
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
 
         # Filter button (optional)
         if filter_func is not None:
@@ -100,7 +113,7 @@ class TableHeader(QWidget):
             )
             self.filter_button.setFixedSize(55, 55)
             self.filter_button.clicked.connect(lambda: self.filter_func())
-            layout.addWidget(self.filter_button)
+            self.toolbar_layout.addWidget(self.filter_button)
 
         # Search bar
         if show_search:
@@ -109,7 +122,12 @@ class TableHeader(QWidget):
                 label_text="Search...",
                 leading_icon=search_icon_path
             )
-            self.search_input.setFixedWidth(300)
+            if separate_toolbar:
+                self.search_input.setMinimumWidth(160)
+                self.search_input.setMaximumWidth(300)
+                self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            else:
+                self.search_input.setFixedWidth(300)
             self.search_input.setMinimumHeight(55)
 
             # Add clear button when text is present
@@ -122,7 +140,10 @@ class TableHeader(QWidget):
             # Connect search signal
             self.search_input.line_edit.textChanged.connect(self.search_changed.emit)
 
-            layout.addWidget(self.search_input)
+            self.toolbar_layout.addWidget(self.search_input)
+
+        if separate_toolbar:
+            self.toolbar_layout.addStretch()
 
         # Add button
         if show_add_button:
@@ -130,9 +151,19 @@ class TableHeader(QWidget):
             self.add_button.setFixedHeight(47)
             self.add_button.clicked.connect(self.add_clicked.emit)
 
-            layout.addWidget(self.add_button)
+            self.toolbar_layout.addWidget(self.add_button)
 
         logger.debug(f"TableHeader initialized: title='{title}'")
+
+    def add_action_button(self, button):
+        """Insert a secondary action before the primary action in the toolbar."""
+        if self.show_add_button:
+            self.toolbar_layout.insertWidget(self.toolbar_layout.indexOf(self.add_button), button)
+            # Move the new action into the toolbar focus chain, then put it before the primary.
+            QWidget.setTabOrder(self.add_button, button)
+            QWidget.setTabOrder(button, self.add_button)
+        else:
+            self.toolbar_layout.addWidget(button)
 
 
 class PaginationControls(QWidget):
@@ -342,9 +373,13 @@ class SkewersMenuButton(QToolButton):
         """)
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("Row actions")
+        self.setToolTip("Row actions")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Create menu
         self.menu = QMenu(self)
+        self.setMenu(self.menu)
         self.menu.setStyleSheet(f"""
             QMenu {{
                 background-color: {colors.BACKGROUND_CONTENT};

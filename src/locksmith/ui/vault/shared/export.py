@@ -7,6 +7,8 @@ Shared utility for exporting identifiers to CESR files.
 from PySide6.QtWidgets import QFileDialog, QWidget
 from keri import help
 
+from locksmith.core.remoting import identifier_introduction
+
 logger = help.ogler.getLogger(__name__)
 
 
@@ -42,14 +44,10 @@ def export_identifier_to_cesr(parent_widget: QWidget, app, identifier_alias: str
             logger.info("Identifier export cancelled")
             return
 
-        # Collect KEL messages
-        kel = bytearray()
-        for msg in hab.db.clonePreIter(pre=hab.pre):
-            kel.extend(msg)
-
-        # Write to file in binary mode
+        # Include the signed routes needed to send messages to this identifier.
+        introduction = identifier_introduction(hab)
         with open(file_path, "wb") as f:
-            f.write(kel)
+            f.write(introduction)
 
         logger.info(f"Identifier '{identifier_alias}' exported to {file_path}")
 

@@ -127,5 +127,6 @@
         <file>assets/custom/flags/au.svg</file>
         <file>assets/custom/flags/us.svg</file>
         <file>assets/custom/flags/de.svg</file>
+        <file>assets/material-icons/swap_horiz.svg</file>
     </qresource>
 </RCC>

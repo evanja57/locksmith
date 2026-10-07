@@ -6,6 +6,10 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from hio.base import doing
+from keri import kering
+from keri.app import habbing, organizing
+from keri.core import eventing
 
 from locksmith.core import remoting
 
@@ -33,6 +37,53 @@ class _FakeOrg:
 
     def get(self, pre):
         return self.records.get(pre)
+
+
+@pytest.mark.parametrize("signature", ["valid", "unsigned", "corrupt"])
+def test_import_native_identifier_requires_verified_key_state(tmp_path, signature):
+    with (
+        habbing.openHby(name="import-source", temp=True) as source,
+        habbing.openHby(name="import-target", temp=True) as target,
+    ):
+        hab = source.makeHab(name="source", kind=kering.Kinds.cesr, version=kering.Vrsn_2_0)
+        if signature == "valid":
+            kel = b"".join(hab.db.clonePreIter(pre=hab.pre))
+        elif signature == "unsigned":
+            kel = hab.iserder.raw
+        else:
+            kel = eventing.messagize(
+                serder=hab.iserder,
+                sigers=hab.sign(ser=b"corrupted message"),
+                gvrsn=kering.Vrsn_2_0,
+            )
+        role = hab.makeEndRole(eid=hab.pre, kind=kering.Kinds.cesr)
+        location = hab.makeLocScheme(url="http://127.0.0.1:9999", kind=kering.Kinds.cesr)
+        path = tmp_path / "introduction.cesr"
+        path.write_bytes(bytes(kel) + bytes(role) + bytes(location))
+
+        org = organizing.Organizer(hby=target)
+        app = SimpleNamespace(vault=SimpleNamespace(hby=target, org=org))
+        events = []
+        signals = SimpleNamespace(emit_doer_event=lambda **event: events.append(event))
+        doer = remoting.ImportDoer(app=app, file=str(path), alias="source", signal_bridge=signals)
+        doing.Doist(tock=0.03125, real=False, limit=1.0).do(doers=[doer])
+
+        event, = events
+        assert event["doer_name"] == "ImportDoer"
+        if signature == "valid":
+            assert event["event_type"] == "remote_identifier_imported"
+            assert event["data"]["success"] is True
+            assert event["data"]["pre"] == hab.pre
+            assert hab.pre in target.kevers
+            assert org.get(hab.pre)["alias"] == "source"
+            assert target.db.ends.get(keys=(hab.pre, "controller", hab.pre)).allowed is True
+            assert target.db.locs.get(keys=(hab.pre, "http")).url == "http://127.0.0.1:9999"
+        else:
+            assert event["event_type"] == "import_failed"
+            assert event["data"]["success"] is False
+            assert "No verified key state" in event["data"]["error"]
+            assert hab.pre not in target.kevers
+            assert org.get(hab.pre) is None
 
 
 def test_resolve_oobi_blocking_waits_for_live_oobi_resolution(monkeypatch):
@@ -490,3 +541,60 @@ def test_resolve_oobi_blocking_uses_sync_doer_when_qtask_is_missing(monkeypatch)
     assert captured["doer_kwargs"]["timeout_seconds"] == 1.25
     assert len(captured["doers"]) == 1
     assert captured["limit"] == pytest.approx(1.26)
+
+
+@pytest.mark.parametrize('transferable_endpoint', [False, True])
+def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transferable_endpoint):
+    from keri.app import forwarding
+    from locksmith.ui.vault.shared.export import export_identifier_to_cesr
+
+    with (
+        habbing.openHby(name='export-owner', temp=True, version=kering.Vrsn_2_0) as source,
+        habbing.openHby(name='export-service', temp=True, version=kering.Vrsn_2_0) as service,
+        habbing.openHby(name='export-recipient', temp=True, version=kering.Vrsn_2_0) as target,
+    ):
+        hab = source.makeHab(name='owner', version=kering.Vrsn_2_0, kind=kering.Kinds.cesr)
+        mailbox = service.makeHab(name='mailbox', transferable=transferable_endpoint,
+                                 version=kering.Vrsn_2_0)
+        unrelated = source.makeHab(name='unrelated', version=kering.Vrsn_2_0)
+        sender = target.makeHab(name='sender', version=kering.Vrsn_2_0)
+        source.psr.parse(ims=mailbox.replay(gvrsn=kering.Vrsn_2_0), version=kering.Vrsn_2_0)
+        source.psr.parse(ims=mailbox.makeLocScheme(url='http://127.0.0.1:9999',
+                                                version=kering.Vrsn_2_0),
+                         version=kering.Vrsn_2_0)
+        source.psr.parse(ims=hab.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox,
+                                           version=kering.Vrsn_2_0), version=kering.Vrsn_2_0)
+        org = organizing.Organizer(hby=target)
+        app = SimpleNamespace(vault=SimpleNamespace(hby=target, org=org))
+        path = tmp_path / 'introduction.cesr'
+        path.write_bytes(hab.replay(gvrsn=kering.Vrsn_2_0))
+
+        def import_contact():
+            events = []
+            signals = SimpleNamespace(emit_doer_event=lambda **event: events.append(event))
+            doer = remoting.ImportDoer(app=app, file=str(path), alias='owner', signal_bridge=signals)
+            doing.Doist(tock=0.03125, real=False, limit=1.0).do(doers=[doer])
+            assert events[0]['event_type'] == 'remote_identifier_imported'
+
+        # The old KEL-only export creates a contact but cannot route a message.
+        import_contact()
+        poster = forwarding.StreamPoster(hby=target, hab=sender, recp=hab.pre, topic='credential')
+        attachment = eventing.messagize(serder=sender.iserder,
+                                        sigers=sender.sign(ser=sender.iserder.raw),
+                                        gvrsn=kering.Vrsn_2_0)[sender.iserder.size:]
+        with pytest.raises(kering.ValidationError, match='No end roles'):
+            poster.send(sender.iserder, attachment=attachment, gvrsn=kering.Vrsn_2_0)
+
+        monkeypatch.setattr('locksmith.ui.vault.shared.export.QFileDialog.getSaveFileName',
+                            lambda *args, **kwargs: (str(path), 'CESR Files (*.cesr)'))
+        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
+        assert path.read_bytes() == remoting.identifier_introduction(hab)
+        import_contact()
+        assert target.db.ends.get(keys=(hab.pre, 'mailbox', mailbox.pre)).allowed is True
+        assert target.db.locs.get(keys=(mailbox.pre, 'http')).url == 'http://127.0.0.1:9999'
+        assert mailbox.pre in target.kevers
+        assert unrelated.pre not in target.kevers
+        assert org.get(hab.pre)['alias'] == 'owner'
+        assert sender.endsFor(hab.pre)['mailbox'][mailbox.pre]['http'] == 'http://127.0.0.1:9999'
+        poster.send(sender.iserder, attachment=attachment, gvrsn=kering.Vrsn_2_0)
+        assert len(poster.evts) == 1  # Resolve/queue only; no network delivery.

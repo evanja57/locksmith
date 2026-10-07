@@ -35,6 +35,26 @@ def message_version(ims: bytes | bytearray) -> kering.Versionage:
     return kering.Vrsn_2_0
 
 
+def identifier_introduction(hab) -> bytes:
+    """Export public key history and retained, signed delivery information."""
+    version = kering.Vrsn_2_0
+    stream = bytearray()
+    # Keep the selected identifier first: file import takes its prefix from
+    # the first event. Never include private keys or unrelated contacts.
+    for message in hab.db.clonePreIter(pre=hab.pre, gvrsn=version):
+        stream.extend(message)
+    roles = [(role, eid) for (_, role, eid), end in hab.db.ends.getTopItemIter(keys=(hab.pre,))
+             if end.allowed or end.enabled]
+    endpoints = dict.fromkeys([*hab.kever.wits, *(eid for _, eid in roles)])
+    for eid in endpoints:
+        if eid != hab.pre and eid in hab.kevers:
+            stream.extend(hab.replay(pre=eid, gvrsn=version))
+        stream.extend(hab.loadLocScheme(eid=eid, gvrsn=version))
+    for role, eid in roles:
+        stream.extend(hab.loadEndRole(cid=hab.pre, role=role, eid=eid, gvrsn=version))
+    return bytes(stream)
+
+
 def upsert_remote_id_metadata(app, pre: str, *, alias=None, cid=None, tag=None, oobi=None):
     """Create or update Organizer metadata for a resolved remote identifier."""
     if not pre:
@@ -738,6 +758,8 @@ class ImportDoer(doing.DoDoer):
 
                 serder = SerderKERI(raw=ims)
                 pre = serder.pre
+                if pre not in self.hby.kevers:
+                    raise ValueError(f"No verified key state for imported identifier {pre}")
 
                 remoteId = {
                     'alias': self.alias,

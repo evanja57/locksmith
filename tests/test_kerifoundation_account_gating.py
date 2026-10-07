@@ -25,7 +25,10 @@ from locksmith.plugins.kerifoundation.plugin import KeriFoundationPlugin
 class FakeHby:
     def __init__(self, name="test-vault"):
         self.name = name
-        self.db = SimpleNamespace(names=SimpleNamespace(getTopItemIter=lambda keys=(): iter(())))
+        self.base = ""
+        self.temp = False
+        self.db = SimpleNamespace(headDirPath=None,
+                                  names=SimpleNamespace(getTopItemIter=lambda keys=(): iter(())))
 
     def habByName(self, alias):
         return None
@@ -129,19 +132,11 @@ def test_kf_account_record_survives_reload(tmp_path):
 
 
 def test_kf_plugin_initializes_pending_account_and_gates_to_onboarding(
-        qapp, tmp_path, monkeypatch):
+        qapp, tmp_path):
     app = FakeApp()
+    app.vault.hby.db.headDirPath = str(tmp_path)
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin.KFBaser",
-        lambda name, reopen=True: KFBaser(
-            name=name,
-            headDirPath=str(tmp_path),
-            reopen=reopen,
-        ),
-    )
 
     plugin.on_vault_opened(app.vault)
     try:
@@ -160,19 +155,11 @@ def test_kf_plugin_initializes_pending_account_and_gates_to_onboarding(
         plugin.on_vault_closed(app.vault)
 
 
-def test_kf_plugin_allows_normal_menu_after_onboarding(qapp, tmp_path, monkeypatch):
+def test_kf_plugin_allows_normal_menu_after_onboarding(qapp, tmp_path):
     app = FakeApp()
+    app.vault.hby.db.headDirPath = str(tmp_path)
     plugin = KeriFoundationPlugin()
     plugin.initialize(app)
-
-    monkeypatch.setattr(
-        "locksmith.plugins.kerifoundation.plugin.KFBaser",
-        lambda name, reopen=True: KFBaser(
-            name=name,
-            headDirPath=str(tmp_path),
-            reopen=reopen,
-        ),
-    )
 
     plugin.on_vault_opened(app.vault)
     try:

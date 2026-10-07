@@ -475,7 +475,7 @@ wheels = [
 [[package]]
 name = "keri"
 version = "2.1.0.dev1"
-source = { git = "https://github.com/WebOfTrust/keripy.git#1311136c90860749fd597504fea3121263414834" }
+source = { git = "https://github.com/WebOfTrust/keripy.git#a9d0d6b4bb5157f81c38b2e8cdbf263f6084f071" }
 dependencies = [
     { name = "apispec" },
     { name = "blake3" },

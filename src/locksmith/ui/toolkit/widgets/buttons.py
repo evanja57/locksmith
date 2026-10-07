@@ -156,7 +156,7 @@ class LocksmithButton(QPushButton):
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
             painter.drawPixmap(0, 0, original_pixmap)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(white_pixmap.rect(), QColor("white"))
+            painter.fillRect(white_pixmap.rect(), QColor(colors.WHITE))
             painter.end()
 
             icon = QIcon(white_pixmap)
@@ -167,7 +167,7 @@ class LocksmithButton(QPushButton):
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: {colors.PRIMARY};
-                color: white;
+                color: {colors.WHITE};
                 border-radius: 6px;
                 font-size: 14px;
                 padding-top: 12px;
@@ -182,6 +182,11 @@ class LocksmithButton(QPushButton):
             }}
             QPushButton:pressed {{
                 background-color: {colors.PRIMARY_HOVER};
+            }}
+            QPushButton:disabled {{
+                background-color: {colors.BACKGROUND_DISABLED};
+                color: {colors.TEXT_MUTED};
+                border-color: {colors.BORDER_NEUTRAL};
             }}
         """)
 
@@ -204,7 +209,7 @@ class LocksmithInvertedButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(f"""
             QPushButton {{
-                background-color: white;
+                background-color: {colors.WHITE};
                 color: {colors.PRIMARY};
                 border: 1px solid {colors.PRIMARY};
                 border-radius: 6px;
@@ -326,7 +331,7 @@ class BackButton(QPushButton):
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
             painter.drawPixmap(0, 0, scaled)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(colored_pixmap.rect(), QColor("white"))
+            painter.fillRect(colored_pixmap.rect(), QColor(colors.WHITE))
             painter.end()
             
             return colored_pixmap
@@ -486,7 +491,7 @@ class LocksmithIconButton(QToolButton):
         Change the icon color dynamically.
 
         Args:
-            color: Color as a string (e.g., "#F57B03", "white", "black").
+            color: A color string from locksmith.ui.colors.
         """
         original_pixmap = QPixmap(self.icon_path)
 
@@ -643,11 +648,11 @@ class LocksmithRadioPanel(QFrame):
     toggled = Signal(bool)
 
     # Colors
-    BORDER_NORMAL = "#E0E0E0"
-    BORDER_SELECTED = "#2196F3"
-    BG_SELECTED = "#E3F2FD"
-    TEXT_SELECTED = "#2196F3"
-    TEXT_NORMAL = "#43474E"
+    BORDER_NORMAL = colors.BACKGROUND_NEUTRAL
+    BORDER_SELECTED = colors.BLUE_SELECTION
+    BG_SELECTED = colors.BLUE_SELECTION_BG
+    TEXT_SELECTED = colors.BLUE_SELECTION
+    TEXT_NORMAL = colors.RADIO_BUTTON
 
     def __init__(self, header: str, subheader: str, parent=None):
         """
@@ -742,7 +747,7 @@ class LocksmithRadioPanel(QFrame):
                     height: 16px;
                     border: 2px solid {self.BORDER_SELECTED};
                     border-radius: 10px;
-                    background-color: #FFFFFF;
+                    background-color: {colors.WHITE};
                 }}
                 QRadioButton::indicator:checked {{
                     background-color: qradialgradient(
@@ -750,35 +755,35 @@ class LocksmithRadioPanel(QFrame):
                         fx:0.5, fy:0.5,
                         stop:0 {self.BORDER_SELECTED},
                         stop:0.6 {self.BORDER_SELECTED},
-                        stop:0.7 #FFFFFF,
-                        stop:1 #FFFFFF
+                        stop:0.7 {colors.WHITE},
+                        stop:1 {colors.WHITE}
                     );
                     border: 2px solid {self.BORDER_SELECTED};
                 }}
             """)
         else:
-            self._radio_button.setStyleSheet("""
-                QRadioButton {
+            self._radio_button.setStyleSheet(f"""
+                QRadioButton {{
                     spacing: 6px;
-                }
-                QRadioButton::indicator {
+                }}
+                QRadioButton::indicator {{
                     width: 16px;
                     height: 16px;
-                    border: 2px solid #43474E;
+                    border: 2px solid {colors.RADIO_BUTTON};
                     border-radius: 10px;
-                    background-color: #FFFFFF;
-                }
-                QRadioButton::indicator:checked {
+                    background-color: {colors.WHITE};
+                }}
+                QRadioButton::indicator:checked {{
                     background-color: qradialgradient(
                         cx:0.5, cy:0.5, radius:0.5,
                         fx:0.5, fy:0.5,
-                        stop:0 #43474E,
-                        stop:0.6 #43474E,
-                        stop:0.7 #FFFFFF,
-                        stop:1 #FFFFFF
+                        stop:0 {colors.RADIO_BUTTON},
+                        stop:0.6 {colors.RADIO_BUTTON},
+                        stop:0.7 {colors.WHITE},
+                        stop:1 {colors.WHITE}
                     );
-                    border: 2px solid #000000;
-                }
+                    border: 2px solid {colors.BLACK};
+                }}
             """)
 
     def _update_text_style(self):
@@ -870,30 +875,30 @@ class IconRightButton(QWidget):
 
         # Make it look and behave like a button
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setStyleSheet("""
-            IconRightButton {
+        self.setStyleSheet(f"""
+            IconRightButton {{
                 background-color: transparent;
                 font-size: 16px;
-                color: #383838;
+                color: {colors.TEXT_TOOLBAR};
                 border: none;
                 text-align: left;
                 padding-left: 10px;
                 padding-top: 0px;  /* Make room for icon */
-            }
-            QLabel {
+            }}
+            QLabel {{
                 border: none;
-            }
-            IconRightButton:hover {
-                background-color: #34495e;
+            }}
+            IconRightButton:hover {{
+                background-color: {colors.TOOLBAR_HOVER};
                 border-radius: 4px;
 
-            }
-            QLabel {
+            }}
+            QLabel {{
                 font-size: 16px;
-                color: #383838;
+                color: {colors.TEXT_TOOLBAR};
                 background-color: transparent;
                 border: none;
-            }
+            }}
         """)
 
     def set_text(self, text):

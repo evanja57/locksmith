@@ -7,8 +7,10 @@ Schema list content page (displayed within VaultPage container).
 import logging
 from typing import Dict, Any, TYPE_CHECKING
 
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QVBoxLayout, QSizePolicy
 
+from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.schema.add import AddSchemaDialog
@@ -51,9 +53,8 @@ class SchemaListPage(BaseListPage):
         main_layout.setSpacing(0)
 
         # Set background using palette instead of stylesheet for better control
-        from PySide6.QtGui import QPalette, QColor
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor("#F8F9FF"))
+        palette.setColor(QPalette.ColorRole.Window, QColor(colors.BACKGROUND_CONTENT))
         self.setPalette(palette)
         self.setAutoFillBackground(True)
 
@@ -68,7 +69,7 @@ class SchemaListPage(BaseListPage):
             show_search=True,
             show_add_button=True,
             add_button_text="Add Schema",
-            row_actions=["View","Delete"],
+            row_actions=["View", "Apply for credential", "Delete"],
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
                 "Delete": ":/assets/material-icons/delete.svg"
@@ -134,7 +135,9 @@ class SchemaListPage(BaseListPage):
         schema_said = row_data.get('SAID', '')
         logger.info(f"Row action '{action}' triggered for: {schema_name} v{schema_version}")
 
-        if action == "View":
+        if action == "Apply for credential":
+            self.parent.start_credential_exchange('Apply', schema=schema_said)
+        elif action == "View":
             # Open view schema dialog
             try:
                 dialog = ViewSchemaDialog(

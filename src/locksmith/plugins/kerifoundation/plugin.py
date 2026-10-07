@@ -143,7 +143,9 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
 
     def on_vault_opened(self, vault: Any) -> None:
         self._closing_vault = False
-        self._db = KFBaser(name=f"kf_{vault.hby.name}", reopen=True)
+        self._db = KFBaser(name=f"kf_{vault.hby.name}", base=vault.hby.base,
+                          temp=vault.hby.temp, headDirPath=vault.hby.db.headDirPath,
+                          reopen=True)
         self._boot_client.set_boot_server_aid("")
         self._onboarding_page.set_db(self._db)
         self._onboarding_page.set_boot_client(self._boot_client)
@@ -184,6 +186,7 @@ class KeriFoundationPlugin(PluginBase, WitnessProviderPlugin, AccountProviderPlu
         self._watcher_register.set_db(None)
         self._boot_client.set_boot_server_aid("")
         if db is not None:
+            clear = clear or db.temp
             if stopped or not stateful_tasks:
                 db.close(clear=clear)
             else:

@@ -54,6 +54,7 @@ class Vault(doing.DoDoer):
         """
         self.app = app
         self.hby = hby
+        self.closed = False
         # The app closes registry and message stores before the Habery.
         self.hby.free = False
         self.rgy = rgy
@@ -147,7 +148,8 @@ class Vault(doing.DoDoer):
         # Load protocol handlers
         grouping.loadHandlers(exc=self.exc, mux=self.mux)
         for verb in ('apply', 'offer', 'agree', 'grant', 'admit', 'spurn'):
-            self.exc.addHandler(ipexing.IpexHandler(f'/ipex/{verb}', hby, self.notifier, rgy))
+            self.exc.addHandler(ipexing.IpexHandler(f'/ipex/{verb}', hby, self.notifier, rgy,
+                                                  signals=self.signals))
         challenging.loadHandlers(db=self.hby.db, exc=self.exc, notifier=self.notifier)
 
         # KEL and credential verification
@@ -172,6 +174,7 @@ class Vault(doing.DoDoer):
 
         # Notification toast doer
         self.toast_doer = NotificationToastDoer(vault=self)
+        self.ipex_outbox = ipexing.IpexOutboxDoer(self)
         self.turrent_doer: TurretDoer | None = None
         if ENABLE_TURRET_BROWSER_PLUGIN and self.pluginSettings is not None:
             self.turrent_doer = TurretDoer(self.hby,
@@ -193,6 +196,7 @@ class Vault(doing.DoDoer):
             watchmen,
             kva,
             self.mbx,
+            self.ipex_outbox,
             kraming.Pruner(self.kramer, tock=1.0),
             self.toast_doer,
         ]
@@ -267,91 +271,36 @@ class NotificationToastDoer(doing.Doer):
         """
         super().__init__(tock=3.0, **kwa)  # Check every 3 seconds
         self.vault = vault
-        self.last_notification_time = None
-        self.last_notification_rid = None
+        self._seen_notifications = set()
 
     def enter(self, **kwa):
         """Called when doer starts."""
         logger.info("NotificationToastDoer started")
-        # Initialize with the most recent notification to avoid showing old ones
-        self._update_last_notification()
+        self._remember_notifications()
         self.vault.load_active_mailboxes()
 
     def recur(self, tyme):
         """Called every tock (3 seconds) to check for new notifications."""
         try:
-            # Get the most recent unread notification
-            most_recent = self._get_most_recent_unread()
-
-            if most_recent is None:
-                return False  # No unread notifications
-
-            dt, rid, note = most_recent
-
-            # Check if this is a new notification (different from last one shown)
-            if self.last_notification_rid != rid:
-                logger.info(f"New notification detected: {rid}")
-
-                # Count total unread notifications
-                unread_count = self._count_unread()
-
-                # Format the message
-                message = self._format_notification_message(note)
-
-                # Emit signal for UI to show toast
+            notes = list(self.vault.notifier.noter.notes.getTopItemIter())
+            unread_count = sum(not note.read for _, note in notes)
+            arrived = [(rid, note) for (_, rid), note in notes
+                       if rid not in self._seen_notifications and not note.read]
+            self._seen_notifications = {rid for (_, rid), _ in notes}
+            for rid, note in arrived:
                 self.vault.signals.emit_doer_event(
-                    doer_name="NotificationToast",
-                    event_type="new_notification",
-                    data={
-                        'datetime': note.datetime,
-                        'message': message,
-                        'pending_count': unread_count,
-                        'rid': rid
-                    }
-                )
-
-                # Update tracking
-                self.last_notification_time = dt
-                self.last_notification_rid = rid
+                    doer_name='NotificationToast', event_type='new_notification',
+                    data={'datetime': note.datetime, 'message': self._format_notification_message(note),
+                          'pending_count': unread_count, 'rid': rid})
 
         except Exception as e:
             logger.exception(f"Error in NotificationToastDoer: {e}")
 
         return False  # Continue running
 
-    def _update_last_notification(self):
-        """Initialize tracking with the most recent notification."""
-        most_recent = self._get_most_recent_unread()
-        if most_recent:
-            dt, rid, _ = most_recent
-            self.last_notification_time = dt
-            self.last_notification_rid = rid
-
-    def _get_most_recent_unread(self):
-        """
-        Get the most recent unread notification.
-
-        Returns:
-            Tuple of (datetime, rid, note) or None if no unread notifications
-        """
-        most_recent = None
-        most_recent_dt = None
-
-        for (dt, rid), note in self.vault.notifier.noter.notes.getTopItemIter():
-            if not note.read:
-                if most_recent_dt is None or dt > most_recent_dt:
-                    most_recent_dt = dt
-                    most_recent = (dt, rid, note)
-
-        return most_recent
-
-    def _count_unread(self):
-        """Count total unread notifications."""
-        count = 0
-        for _, note in self.vault.notifier.noter.notes.getTopItemIter():
-            if not note.read:
-                count += 1
-        return count
+    def _remember_notifications(self):
+        """Treat retained notices as history when a vault opens."""
+        self._seen_notifications = {rid for (_, rid), _ in self.vault.notifier.noter.notes.getTopItemIter()}
 
     def _format_notification_message(self, note):
         """
@@ -410,17 +359,31 @@ class NotificationToastDoer(doing.Doer):
                     from keri.peer import exchanging
                     exn, _ = exchanging.cloneMessage(self.vault.hby, said)
                     if exn:
-                        exn_route = exn.ked.get('r', '')
-                        if '/ipex/grant' in exn_route:
-                            return "New credential offer received"
-                        elif '/ipex/admit' in exn_route:
-                            return "Credential accepted"
-                        elif '/ipex/spurn' in exn_route:
-                            return "Credential rejected"
-                        elif '/ipex/apply' in exn_route:
-                            return "New credential application"
-                        elif '/ipex/offer' in exn_route:
-                            return "New credential offer"
+                        hab = self.vault.hby.habByPre(exn.pre)
+                        contact = self.vault.org.get(exn.pre) or {}
+                        sender = hab.name if hab else contact.get('alias', exn.pre[:10] + '…')
+                        stage = exn.route.rsplit('/', 1)[-1].title()
+                        title = 'Credential exchange'
+                        tip = exn
+                        while tip is not None:
+                            requested = ipexing.request_schema(tip)
+                            cached = self.vault.hby.db.schema.get((requested,)) if requested else None
+                            if cached:
+                                title = cached.sed.get('title', title)
+                                break
+                            origins = tip.sad['a'].get('o', [])
+                            if origins:
+                                nests = exchanging.loadParsedNestedSubstreams(self.vault.hby, tip.said)
+                                nest = next((item for item in nests if item.serder.said == origins[0]), None)
+                                if nest:
+                                    schema = nest.serder.schema
+                                    cached = self.vault.hby.db.schema.get((schema,)) if isinstance(schema, str) else None
+                                    schema = cached.sed if cached else schema
+                                    if isinstance(schema, dict):
+                                        title = schema.get('title', title)
+                                    break
+                            tip = self.vault.hby.db.exns.get((tip.sad['p'],)) if tip.sad['p'] else None
+                        return f'{stage} from {sender}: {title}'
                 except Exception as e:
                     logger.warning(f"Error formatting IPEX notification: {e}")
 

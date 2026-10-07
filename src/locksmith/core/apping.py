@@ -109,6 +109,7 @@ class LocksmithApplication:
 
             # Notify plugins before teardown
             if self.vault is not None:
+                self.vault.closed = True
                 self.plugin_manager.on_vault_closed(self.vault)
 
             # Request shutdown
@@ -169,6 +170,7 @@ class LocksmithApplication:
             return False
 
         # First, shutdown the QtTask to stop all doers
+        self.vault.closed = True
         if self.qtask is not None:
             self.qtask.shutdown()
             self.qtask.cleanup()

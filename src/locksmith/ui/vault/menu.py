@@ -109,6 +109,27 @@ class MenuButton(QPushButton):
         self._update_style()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def set_attention(self, needed: bool):
+        """Place an action indicator immediately after the button label."""
+        if not hasattr(self, 'attention_dot'):
+            group = QWidget()
+            group.setStyleSheet('background: transparent;')
+            group.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            row = QHBoxLayout(group)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            self.layout.replaceWidget(self.text_label, group)
+            self.text_label.setStyleSheet(self.text_label.styleSheet().replace('margin-top: 5px', 'margin-top: 0px'))
+            row.addWidget(self.text_label)
+            self.attention_dot = QLabel()
+            self.attention_dot.setFixedSize(8, 8)
+            self.attention_dot.setStyleSheet(
+                f'background: {colors.BLUE_ACCENT}; border: none; border-radius: 4px;')
+            self.attention_dot.setAccessibleName('Needs attention')
+            row.addWidget(self.attention_dot)
+            self._label_group = group
+        self.attention_dot.setVisible(needed)
+
     def set_active(self, active: bool):
         """Set the active/focused state of the button."""
         self.is_active = active
@@ -239,6 +260,8 @@ class MenuButton(QPushButton):
         """Show or hide the text label."""
         if self.text_label:
             self.text_label.setVisible(visible)
+        if hasattr(self, '_label_group'):
+            self._label_group.setVisible(visible)
 
 
 class MenuDivider(QFrame):
@@ -282,6 +305,7 @@ class VaultNavMenu(QFrame):
     # Credentials menu signals
     issued_credentials_clicked = Signal()
     received_credentials_clicked = Signal()
+    activity_clicked = Signal()
     schema_clicked = Signal()
     back_to_vault_from_credentials_clicked = Signal()  # When Back button is clicked from credentials menu
 
@@ -318,7 +342,7 @@ class VaultNavMenu(QFrame):
 
         # Dimensions
         self.collapsed_width = 95
-        self.expanded_width = 260
+        self.expanded_width = 280
 
         # Set initial width
         initial_width = self.collapsed_width if collapsible else self.expanded_width
@@ -412,6 +436,7 @@ class VaultNavMenu(QFrame):
             "settings": ":/assets/custom/settings.png",
             # Credentials menu icons
             "credentials_issued": ":/assets/material-icons/out-badge.svg",
+            "credential_activity": ":/assets/material-icons/swap_horiz.svg",
             "credentials_received": ":/assets/material-icons/in-badge.svg",
             "credentials_schema": ":/assets/material-icons/schema.svg",
             "chevron_left": ":/assets/material-icons/chevron_left.svg",
@@ -643,6 +668,17 @@ class VaultNavMenu(QFrame):
         self.credentials_items.append(received_credentials_btn)
         self.credentials_nav_buttons.append(received_credentials_btn)
         received_credentials_btn.setVisible(False)
+
+        activity_btn = MenuButton(self._create_icon("credential_activity"), "Activity")
+        activity_btn.clicked.connect(
+            lambda: self._on_credentials_nav_clicked(activity_btn, self.activity_clicked)
+        )
+        self.layout.addWidget(activity_btn)
+        self.credentials_items.append(activity_btn)
+        self.credentials_nav_buttons.append(activity_btn)
+        activity_btn.setVisible(False)
+        activity_btn.set_attention(False)
+        self.activity_button = activity_btn
 
         # Schema
         schema_btn = MenuButton(

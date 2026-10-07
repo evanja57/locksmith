@@ -166,6 +166,7 @@ class AddSchemaDialog(LocksmithDialog):
         )
 
         self.setFixedSize(420, 540)
+        self.file_dialog = None
 
         # Create button group for connection type radios (must be after super().__init__)
         self.connection_type_group = QButtonGroup(self)
@@ -263,16 +264,14 @@ class AddSchemaDialog(LocksmithDialog):
             self.show_error(f"Failed to load issuers: {str(e)}")
 
     def _browse_file(self):
-        """Open file dialog to select a schema file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Schema File",
-            "",
-            "JSON Files (*.json);;All Files (*)"
-        )
-        if file_path:
-            self.file_path_field.setText(file_path)
-            self._extract_said_from_file(file_path)
+        """Select a schema without nesting the Qt event loop."""
+        if self.file_dialog is None:
+            self.file_dialog = QFileDialog(self, "Select Schema File", "",
+                                           "JSON Files (*.json);;All Files (*)")
+            self.file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+            self.file_dialog.fileSelected.connect(self._on_file_selected)
+            self.finished.connect(self.file_dialog.reject)
+        self.file_dialog.open()
 
     def _on_oobi_changed(self, text):
         """
@@ -300,13 +299,11 @@ class AddSchemaDialog(LocksmithDialog):
             logger.warning(f"Failed to parse OOBI: {e}")
             self.said_field.setText("")
 
-    def _extract_said_from_file(self, file_path):
-        """
-        Extract and display SAID from a schema file.
-
-        Args:
-            file_path: Path to the schema file
-        """
+    def _on_file_selected(self, file_path):
+        """Show the selected path and its schema SAID."""
+        if not file_path:
+            return
+        self.file_path_field.setText(file_path)
         try:
             import json
             with open(file_path, 'r') as f:

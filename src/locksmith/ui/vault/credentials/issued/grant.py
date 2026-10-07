@@ -6,14 +6,14 @@ Dialog for granting (sending or saving) issued credentials.
 """
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout,
     QButtonGroup, QFileDialog
 )
 from keri import help
 
-from locksmith.core import ipexing
+from locksmith.core import credentialing, ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
@@ -22,6 +22,8 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
+from locksmith.ui.vault.credentials.presentation import attribute_view, identifier_name
+from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 if TYPE_CHECKING:
     from locksmith.core.apping import LocksmithApplication
@@ -57,175 +59,123 @@ class GrantCredentialDialog(LocksmithDialog):
             credential_issuer: Issuer/Recipient identifier for display
         """
         self.app = app
+        self.vault = app.vault
+        self._pending_said = None
+        self._listening = False
         self.parent_widget = parent
         self.credential_said = credential_said
         self.credential_schema = credential_schema
         self.credential_issuer = credential_issuer
 
-        # Create content widget
         content_widget = QWidget()
-        content_widget.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
         layout = QVBoxLayout(content_widget)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
-
-        # Credential info section
-        info_label = QLabel("Credential Details")
-        info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(info_label)
-
-        schema_label = QLabel(f"Schema: {credential_schema}")
-        schema_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 13px;")
-        layout.addWidget(schema_label)
-
-        issuer_label = QLabel(f"Recipient: {credential_issuer}")
-        issuer_label.setStyleSheet(f"color: {colors.TEXT_SECONDARY}; font-size: 13px;")
-        layout.addWidget(issuer_label)
-
-        layout.addSpacing(10)
-
-        # Recipient dropdown
-        recipient_label = QLabel("Grant To")
-        recipient_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(recipient_label)
-
-        self.recipient_dropdown = FloatingLabelComboBox(label_text="Recipient")
-        self.recipient_dropdown.setFixedWidth(400)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(16)
+        title = QLabel(credential_schema)
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setWordWrap(True)
+        title.setStyleSheet('font-size: 18px; font-weight: 600;')
+        layout.addWidget(title)
+        issuer = QLabel(f'Issued by {identifier_name(self.vault, credential_issuer)}')
+        issuer.setTextFormat(Qt.TextFormat.PlainText)
+        issuer.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
+        layout.addWidget(issuer)
+        self.recipient_dropdown = FloatingLabelComboBox(label_text='To')
         self._populate_recipients()
         layout.addWidget(self.recipient_dropdown)
+        self.sharing_notice = QLabel('This shares the whole credential with the recipient.')
+        self.sharing_notice.setWordWrap(True)
+        layout.addWidget(self.sharing_notice)
 
-        layout.addSpacing(10)
+        review = CollapsibleSection(title='Review credential details')
+        review_layout = QVBoxLayout()
+        view = credentialing.credential(self.vault, credential_said)
+        attrs = view['sad'].get('a', {})
+        if isinstance(attrs, dict):
+            for key, value in attrs.items():
+                if key not in ('d', 'i'):
+                    review_layout.addWidget(attribute_view(key, value))
+        review.set_content_layout(review_layout)
+        layout.addWidget(review)
 
-        # Optional message field
-        message_label = QLabel("Message (Optional)")
-        message_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(message_label)
-
-        self.message_field = FloatingLabelLineEdit(label_text="Message")
-        self.message_field.setFixedWidth(400)
-        layout.addWidget(self.message_field)
-
-        layout.addSpacing(10)
-
-        # Grant type radio buttons
-        grant_type_label = QLabel("Grant Type")
-        grant_type_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(grant_type_label)
-
+        self.options = CollapsibleSection(title='More options')
+        options_layout = QVBoxLayout()
+        self.message_field = FloatingLabelLineEdit(label_text='Message (optional)')
+        options_layout.addWidget(self.message_field)
         radio_layout = QHBoxLayout()
-        radio_layout.setSpacing(30)
-
-        self.send_radio = LocksmithRadioButton("Send")
+        self.send_radio = LocksmithRadioButton('Send')
         self.send_radio.setChecked(True)
+        self.save_radio = LocksmithRadioButton('Export to file')
         radio_layout.addWidget(self.send_radio)
-
-        self.save_radio = LocksmithRadioButton("Save")
         radio_layout.addWidget(self.save_radio)
-
         radio_layout.addStretch()
-        layout.addLayout(radio_layout)
-
-        layout.addSpacing(10)
-
-        # Input container for swappable fields (only used in Save mode)
-        input_container = QWidget()
-        input_layout = QVBoxLayout(input_container)
-        input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.setSpacing(8)
-
-        # File name field and browse button (hidden in Send mode)
+        options_layout.addLayout(radio_layout)
         file_row = QHBoxLayout()
-        file_row.setSpacing(8)
-
-        self.file_name_field = FloatingLabelLineEdit(label_text="File Name")
-        self.file_name_field.setFixedWidth(370)
-        default_filename = self._generate_default_filename()
-        self.file_name_field.setText(default_filename)
-        self.file_name_field.setVisible(False)
+        self.file_name_field = FloatingLabelLineEdit(label_text='File name')
+        self.file_name_field.setText(self._generate_default_filename())
+        self.file_name_field.hide()
         file_row.addWidget(self.file_name_field)
-
-        self.browse_button = LocksmithIconButton(":/assets/material-icons/browse.svg", tooltip="Browse files")
-        self.browse_button.setFixedHeight(48)
-        self.browse_button.setFixedWidth(48)
-        self.browse_button.setVisible(False)
+        self.browse_button = LocksmithIconButton(':/assets/material-icons/browse.svg', tooltip='Browse files')
+        self.browse_button.setFixedSize(48, 48)
+        self.browse_button.hide()
         file_row.addWidget(self.browse_button)
-
-        file_row.addStretch()
-        input_layout.addLayout(file_row)
-
-        layout.addWidget(input_container)
-
+        options_layout.addLayout(file_row)
+        self.options.set_content_layout(options_layout)
+        layout.addWidget(self.options)
+        self.delivery_notice = QLabel('Delivery retries automatically. Follow progress in Activity.')
+        self.delivery_notice.setWordWrap(True)
+        self.delivery_notice.setStyleSheet(f'color: {colors.TEXT_SECONDARY}; font-size: 13px;')
+        self.delivery_notice.hide()
+        layout.addWidget(self.delivery_notice)
         layout.addStretch()
-
-        # Buttons
         button_row = QHBoxLayout()
-        button_row.addStretch()
-
-        self.cancel_button = LocksmithInvertedButton("Cancel")
+        button_row.setSpacing(8)
+        self.cancel_button = LocksmithInvertedButton('Cancel')
         button_row.addWidget(self.cancel_button)
-
-        button_row.addSpacing(10)
-
-        self.action_button = LocksmithButton("Grant")
+        button_row.addStretch()
+        self.action_button = LocksmithButton('Send credential')
         button_row.addWidget(self.action_button)
-
-        # Initialize parent dialog
-        super().__init__(
-            parent=parent,
-            title="Grant Credential",
-            title_icon=":/assets/material-icons/share.svg",
-            content=content_widget,
-            buttons=button_row,
-            show_overlay=False
-        )
-
-        self.setFixedSize(540, 630)
-
-        # Define dialog sizes for each mode
-        self._send_mode_size = (540, 630)
-        self._save_mode_size = (540, 675)
-
-        # Create button group for radio buttons
+        super().__init__(parent=parent, title='Send credential',
+                         title_icon=':/assets/material-icons/share.svg',
+                         content=content_widget, buttons=button_row, show_overlay=False,
+                         show_title_divider=False)
+        self.fit_content(560)
+        self.register_collapsible_section(review)
+        self.register_collapsible_section(self.options)
         self.grant_type_group = QButtonGroup(self)
         self.grant_type_group.addButton(self.send_radio)
         self.grant_type_group.addButton(self.save_radio)
-
-        # Connect signals
         self.cancel_button.clicked.connect(self.close)
         self.send_radio.toggled.connect(self._on_grant_type_changed)
         self.save_radio.toggled.connect(self._on_grant_type_changed)
         self.browse_button.clicked.connect(self._browse_file)
         self.action_button.clicked.connect(self._on_grant)
-
-        # Set initial size for Send mode (default)
-        self.setFixedSize(*self._send_mode_size)
+        self.finished.connect(self._disconnect)
 
     def _populate_recipients(self):
         """Populate recipient dropdown from vault organizer (remote identifiers)."""
         self.recipient_dropdown.clear()
 
-        if not self.app or not self.app.vault:
+        if not self.vault:
             return
 
         try:
-            org = self.app.vault.org
+            org = self.vault.org
             remote_ids = org.list()
+            recipient = credentialing.credential(self.vault, self.credential_said)['recipient']
 
             default_index = -1
             current_index = 0
 
             for remote_id in remote_ids:
-                alias = remote_id.get('alias', 'Unknown')
                 pre = remote_id.get('id', '')
-
-                # Display format: "Alice (EAbCD...)"
-                display_text = f"{alias} ({pre})" if len(pre) > 10 else f"{alias} ({pre})"
+                display_text = identifier_name(self.vault, pre)
 
                 # Store full prefix as userData
                 self.recipient_dropdown.addItem(display_text, userData=pre)
 
                 # Check if this is the credential's recipient (default selection)
-                if pre == self.credential_issuer:
+                if pre == recipient:
                     default_index = current_index
 
                 current_index += 1
@@ -271,14 +221,15 @@ class GrantCredentialDialog(LocksmithDialog):
             # Show Send mode UI
             self.file_name_field.hide()
             self.browse_button.hide()
-            self.action_button.setText("Grant")
-            self.setFixedSize(*self._send_mode_size)
+            self.action_button.setText("Send credential")
+            self.sharing_notice.setText("This shares the whole credential with the recipient.")
         else:
             # Show Save mode UI
             self.file_name_field.show()
             self.browse_button.show()
-            self.action_button.setText("Save")
-            self.setFixedSize(*self._save_mode_size)
+            self.action_button.setText("Export credential")
+            self.sharing_notice.setText("Exports the credential for this recipient. Nothing is sent.")
+        self.options.update_content_height()
 
     def _browse_file(self):
         """Open file save dialog to select output path."""
@@ -337,17 +288,23 @@ class GrantCredentialDialog(LocksmithDialog):
         self.action_button.setEnabled(False)
         self.action_button.setText("Processing...")
         try:
-            hab = self.app.vault.hby.habByPre(self.credential_issuer)
+            if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
+                raise ValueError("This vault is closed")
+            if self._pending_said:
+                ipexing.retry(self.vault, self._pending_said)
+                self.action_button.setText("Sending...")
+                return
+            hab = self.vault.hby.habByPre(self.credential_issuer)
             if hab is None:
                 raise ValueError("The credential issuer is not a local identifier")
             serder, attachment = ipexing.grant(
-                self.app.vault, hab, self.credential_said,
+                self.vault, hab, self.credential_said,
                 self.recipient_dropdown.currentData(), self.message_field.text(),
             )
             if self.send_radio.isChecked():
                 self._send_grant(hab, serder, attachment)
             else:
-                stream = ipexing.prepare(self.app.vault, hab, serder, attachment)
+                stream = ipexing.prepare(self.vault, hab, serder, attachment)
                 self._save_grant(stream)
         except Exception as error:
             logger.exception("Failed to create credential grant")
@@ -356,25 +313,45 @@ class GrantCredentialDialog(LocksmithDialog):
 
     def _send_grant(self, hab, serder, attachment):
         """Submit the signed grant through the vault's transport."""
-        self._pending_said = serder.said
-        doer = ipexing.SendIpexDoer(self.app.vault, hab, serder, attachment)
-        self.app.vault.signals.doer_event.connect(self._on_doer_event)
-        self.app.vault.extend([doer])
+        self._pending_said = ipexing.submit(self.vault, hab, serder, attachment)
+        self.cancel_button.setText("Close")
+        self.delivery_notice.show()
+        self.vault.signals.doer_event.connect(self._on_doer_event)
+        self._listening = True
+        # A retry sends this same grant, including its recipient and message.
+        for field in (self.recipient_dropdown, self.message_field, self.send_radio, self.save_radio):
+            field.setEnabled(False)
         self.action_button.setText("Sending...")
+
+    def _disconnect(self):
+        if self._listening:
+            self.vault.signals.doer_event.disconnect(self._on_doer_event)
+            self._listening = False
 
     def _on_doer_event(self, doer_name: str, event_type: str, data: dict):
         """Show the transport result for this grant."""
+        if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
+            self._disconnect()
+            return
+        if not self._listening:
+            return
         if doer_name != "Ipex" or data.get('said') != self._pending_said:
             return
         if event_type not in ("transport_submitted", "send_failed"):
             return
-        self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
         if event_type == "transport_submitted":
+            self._disconnect()
+            self.delivery_notice.setText("Submitted for delivery. Peer acceptance is separate.")
+            self.action_button.setEnabled(False)
             self.show_success("Grant submitted for delivery")
             QTimer.singleShot(2000, self.accept)
         else:
             self.show_error(f"Failed to send: {data.get('error', 'Unknown error')}")
             self._reset_button()
+            record = self.vault.db.outbox.get((self._pending_said,))
+            if record.status == 'blocked':
+                self.action_button.setEnabled(False)
+                self.delivery_notice.setText("Delivery stopped. See Credentials → Activity for details.")
 
     def _save_grant(self, grant: bytes):
         """Save credential to file in CESR format."""
@@ -407,5 +384,5 @@ class GrantCredentialDialog(LocksmithDialog):
     def _reset_button(self):
         """Reset action button to enabled state."""
         self.action_button.setEnabled(True)
-        button_text = "Grant" if self.send_radio.isChecked() else "Save"
+        button_text = "Retry sending" if self._pending_said else ("Send credential" if self.send_radio.isChecked() else "Export credential")
         self.action_button.setText(button_text)

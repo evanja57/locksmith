@@ -65,7 +65,7 @@ class CollapsibleSection(QWidget):
         layout.addWidget(self.content_area, 1, 0)
 
         if not button:
-            self.toggle_button.clicked.connect(self._on_toggle)
+            self.toggle_button.toggled.connect(self._on_toggle)
 
     def sizeHint(self):
         """
@@ -139,8 +139,10 @@ class CollapsibleSection(QWidget):
 
         # Reset toggle button state
         if isinstance(self.toggle_button, QToolButton):
+            blocked = self.toggle_button.blockSignals(True)
             self.toggle_button.setChecked(False)
             self.toggle_button.setArrowType(Qt.ArrowType.RightArrow)
+            self.toggle_button.blockSignals(blocked)
         
         if self._on_expand_changed:
             self._on_expand_changed(False)

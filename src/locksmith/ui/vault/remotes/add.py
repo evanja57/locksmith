@@ -138,6 +138,7 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
         )
 
         self.setFixedSize(380, 480)
+        self.file_dialog = None
 
         # Create button group for connection type radios (must be after super().__init__)
         self.connection_type_group = QButtonGroup(self)
@@ -168,20 +169,13 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             self.browse_button.show()
 
     def _browse_file(self):
-        """Open file dialog to select a file path."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select File",
-            "",
-            "All Files (*)"
-        )
-        if file_path:
-            alias = self.alias_field.text().strip()
-            previous_name = Path(self.file_path_field.text()).stem
-            if not alias or alias == previous_name:
-                self.alias_field.setText(Path(file_path).stem)
-            self.file_path_field.setText(file_path)
-            self._extract_prefix_from_file(file_path)
+        """Select a file without nesting the Qt event loop."""
+        if self.file_dialog is None:
+            self.file_dialog = QFileDialog(self, "Select File", "", "All Files (*)")
+            self.file_dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+            self.file_dialog.fileSelected.connect(self._on_file_selected)
+            self.finished.connect(self.file_dialog.reject)
+        self.file_dialog.open()
 
     def _on_oobi_changed(self, text):
         """
@@ -209,13 +203,15 @@ class AddRemoteIdentifierDialog(LocksmithDialog):
             logger.warning(f"Failed to parse OOBI: {e}")
             self.prefix_field.clear()
 
-    def _extract_prefix_from_file(self, file_path):
-        """
-        Extract and display prefix from a KERI event file.
-
-        Args:
-            file_path: Path to the file
-        """
+    def _on_file_selected(self, file_path):
+        """Show the selected path and its identifier prefix."""
+        if not file_path:
+            return
+        alias = self.alias_field.text().strip()
+        previous_name = Path(self.file_path_field.text()).stem
+        if not alias or alias == previous_name:
+            self.alias_field.setText(Path(file_path).stem)
+        self.file_path_field.setText(file_path)
         try:
             with open(file_path, 'rb') as f:
                 ims = f.read()

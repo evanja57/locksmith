@@ -6,14 +6,16 @@ Dialog for viewing issued credential details
 """
 import json
 import logging
-from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
+from locksmith.ui import colors
 from locksmith.core import credentialing
-from keri.help import helping
+from locksmith.ui.vault.credentials.presentation import attribute_view, credential_name, identifier_name, date_label, status_label
+from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 from locksmith.ui.toolkit.widgets import (
     LocksmithInvertedButton
@@ -25,15 +27,12 @@ from locksmith.ui.toolkit.widgets.fields import (
     LocksmithPlainTextEdit
 )
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 
 class ViewIssuedCredentialDialog(LocksmithDialog):
     """Dialog for viewing issued credential details."""
-    def __init__(self, icon_path, app, credential_said, parent=None):
+    def __init__(self, icon_path, app, credential_said, parent=None, received=False):
         """
         Initialize the ViewIssuedCredentialDialog.
 
@@ -45,13 +44,14 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         """
         self.app = app
         self.credential_said = credential_said
+        self.received = received
 
         # Get the credential details from the app
         try:
-            self.credential = credentialing.credential(self.app.vault, self.credential_said)
+            self.credential = credentialing.credential(self.app.vault, self.credential_said, received=received)
 
             # Get schema info
-            self.schema_title = (self.credential.get("schema") or {}).get("title", "Unknown Schema")
+            self.schema_title = credential_name(self.credential.get("schema"))
 
         except Exception as e:
             logger.error(f"Error loading credential: {e}")
@@ -73,7 +73,7 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         # Create content widget
         content_widget = QWidget()
-        content_widget.setStyleSheet("background-color: #F8F9FF;")
+        content_widget.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(15)
@@ -81,6 +81,11 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         # Create button row
         button_row = QHBoxLayout()
         self.close_button = LocksmithInvertedButton("Close")
+        if hasattr(parent, 'show_credential_activity'):
+            self.history_button = LocksmithInvertedButton('View exchange history')
+            self.history_button.clicked.connect(
+                lambda: (self.close(), parent.show_credential_activity(credential_said, received=received)))
+            button_row.addWidget(self.history_button)
         button_row.addWidget(self.close_button)
 
         # Initialize parent dialog EARLY
@@ -94,31 +99,45 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         )
 
         # Set initial size
-        self.setFixedSize(520, 750)
+        self.resize(620, 650)
 
-        # NOW build sections (after super().__init__ has been called)
-        # SAID Section
-        self._build_said_section(layout)
-
-        # Schema Section
-        self._build_schema_section(layout)
-
-        # Issuer Section
         self._build_issuer_section(layout)
-
-        # Recipient Section
         self._build_recipient_section(layout)
-
-        # Status Section
         self._build_status_section(layout)
-
-        # Issued Date Section
         self._build_issued_date_section(layout)
-
-        # Credential Content Section (JSON)
-        self._build_credential_content_section(layout)
-
-        layout.addStretch()
+        attributes = self.credential['sad'].get('a', {})
+        schema = self.credential.get('schema') or {}
+        definition = schema.get('properties', {}).get('a', {})
+        definition = definition if isinstance(definition, dict) else {}
+        definition = next((item for item in definition.get('oneOf', [definition])
+                           if isinstance(item, dict) and item.get('type') == 'object'), {})
+        for name, value in attributes.items() if isinstance(attributes, dict) else []:
+            if name in ('d', 'i'):
+                continue
+            prop = definition.get('properties', {}).get(name, {})
+            prop = prop if isinstance(prop, dict) else {}
+            layout.addWidget(attribute_view(prop.get('description', name), value, prop))
+        verification = CollapsibleSection(title='Verification details')
+        details = QVBoxLayout()
+        auth = self.credential['status'].get('auth')
+        details.addWidget(QLabel('Authentication: ' + {'anchor': 'Issuer KEL anchor',
+            'signature': 'Issuer signature', 'registry': 'Registry'}.get(auth, 'Not currently verified')))
+        for label, pre in (('Issuer AID', self.credential['sad']['i']),
+                           ('Recipient AID', self.credential['recipient'])):
+            if pre:
+                row = QHBoxLayout()
+                text = QLabel(f'{label}: {pre}')
+                text.setTextFormat(Qt.TextFormat.PlainText)
+                text.setWordWrap(True)
+                row.addWidget(text)
+                row.addWidget(LocksmithCopyButton(copy_content=pre))
+                details.addLayout(row)
+        self._build_said_section(details)
+        self._build_schema_section(details)
+        self._build_credential_content_section(details)
+        verification.set_content_layout(details)
+        layout.addWidget(verification)
+        self.register_collapsible_section(verification)
 
         # Connect buttons
         self.close_button.clicked.connect(self.close)
@@ -166,15 +185,7 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         # Get issuer prefix from credential
         issuer_pre = self.credential['sad']['i']
 
-        # Try to find issuer name if it's a local identifier
-        issuer_display = issuer_pre
-        try:
-            for hab_pre, hab in self.app.vault.hby.habs.items():
-                if hab.pre == issuer_pre:
-                    issuer_display = f"{hab.name} ({issuer_pre[:35]}...)"
-                    break
-        except:
-            pass
+        issuer_display = identifier_name(self.app.vault, issuer_pre)
 
         self.issuer_field = LocksmithLineEdit("Issuer")
         self.issuer_field.setText(issuer_display)
@@ -190,17 +201,10 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
         layout.addWidget(recipient_label)
 
         # Get recipient from credential attributes
-        recipient_pre = self.credential['sad']['a'].get('i', '')
+        attributes = self.credential['sad'].get('a', {})
+        recipient_pre = attributes.get('i', '') if isinstance(attributes, dict) else ''
 
-        # Try to find recipient name if it's a local identifier
-        recipient_display = recipient_pre or "Not specified"
-        try:
-            for hab_pre, hab in self.app.vault.hby.habs.items():
-                if hab.pre == recipient_pre:
-                    recipient_display = f"{hab.name} ({recipient_pre[:35]}...)"
-                    break
-        except:
-            pass
+        recipient_display = identifier_name(self.app.vault, recipient_pre)
 
         self.recipient_field = LocksmithLineEdit("Recipient")
         self.recipient_field.setText(recipient_display)
@@ -211,18 +215,13 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
     def _build_status_section(self, layout):
         """Build the status section."""
-        status_label = QLabel("Status")
-        status_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(status_label)
+        label = QLabel("Status")
+        label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(label)
 
         # Determine credential status
         status = self.credential.get("status", {})
-        status_text = {
-            'issued': 'Issued / Active',
-            'revoked': 'Issued / Revoked',
-            'pending': 'Pending verification',
-            'unknown': 'Unknown state',
-        }.get(status['et'], 'Unknown state')
+        status_text = status_label(status)
 
         self.status_field = LocksmithLineEdit("Status")
         self.status_field.setText(status_text)
@@ -233,16 +232,13 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
     def _build_issued_date_section(self, layout):
         """Build the issued date section."""
-        date_label = QLabel("Issued Date")
-        date_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(date_label)
+        date_title = "Accepted" if self.received else "Created"
+        label = QLabel(date_title)
+        label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(label)
 
-        # Get issued date from credential attributes
-        status = self.credential.get("status", {})
-        dt = helping.fromIso8601(status['dt']) if status.get('dt') else None
-
-        self.date_field = LocksmithLineEdit("Issued Date")
-        self.date_field.setText(dt.strftime("%b %d, %Y %I:%M %p") if dt else "Unknown")
+        self.date_field = LocksmithLineEdit(date_title)
+        self.date_field.setText(date_label(self.credential['accepted_at' if self.received else 'created_at']))
         self.date_field.setReadOnly(True)
         self.date_field.setCursorPosition(0)
         self.date_field.setMinimumWidth(420)

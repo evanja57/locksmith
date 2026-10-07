@@ -4,13 +4,15 @@ locksmith.ui.vault.credentials.issued.issue module
 
 Dialog for issuing credentials
 """
-from PySide6.QtCore import Qt, QDateTime
+
+from PySide6.QtCore import Qt, QDateTime, Signal
 from PySide6.QtGui import QIcon, QIntValidator, QDoubleValidator
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QButtonGroup, QDateTimeEdit, QCheckBox
 from keri import help
 from keri.core import coring
 
-from locksmith.core import credentialing
+from locksmith.ui import colors
+from locksmith.core import credentialing, ipexing
 from locksmith.core.credentialing import IssueCredentialDoer
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import (
@@ -21,6 +23,8 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
+from locksmith.ui.vault.credentials.issued.grant import GrantCredentialDialog
+from locksmith.ui.vault.credentials.presentation import attribute_view, credential_name, identifier_name
 from locksmith.ui.vault.shared.witness_auth_mixin import (
     WitnessAuthenticationPanel,
     witness_auth_dialog_height
@@ -31,7 +35,9 @@ logger = help.ogler.getLogger(__name__)
 
 class IssueCredentialDialog(LocksmithDialog):
     """Dialog for issuing a credential."""
-    def __init__(self, app, parent = None):
+    credential_created = Signal(str)
+
+    def __init__(self, app, parent=None, *, request_said=None):
         """
         Initialize the IssueCredentialDialog.
 
@@ -40,6 +46,10 @@ class IssueCredentialDialog(LocksmithDialog):
             parent: Parent widget
         """
         self.app = app
+        self.vault = app.vault
+        self.request_said = request_said
+        self._issuance_id = None
+        self._schema_supported = False
 
         # Initialize storage for dynamic fields
         self._dynamic_field_widgets = {}
@@ -51,7 +61,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         # Create content widget
         content_widget = QWidget()
-        content_widget.setStyleSheet("background-color: #F8F9FF;")
+        content_widget.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
         self._issue_content_widget = content_widget
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -71,6 +81,17 @@ class IssueCredentialDialog(LocksmithDialog):
         self.schema_dropdown.setFixedWidth(340)
         self._populate_schema_dropdown()
         layout.addWidget(self.schema_dropdown)
+
+        self.authentication_dropdown = FloatingLabelComboBox("Issuer authentication")
+        self.authentication_dropdown.addItem("Registry", userData='registry')
+        self.authentication_dropdown.addItem("Issuer KEL anchor", userData='anchor')
+        self.authentication_dropdown.addItem("Issuer signature", userData='signature')
+        layout.addWidget(self.authentication_dropdown)
+        self.authentication_help = QLabel()
+        self.authentication_help.setWordWrap(True)
+        layout.addWidget(self.authentication_help)
+        self.authentication_dropdown.currentIndexChanged.connect(self._update_authentication_help)
+        self._update_authentication_help()
 
         layout.addSpacing(15)
 
@@ -105,7 +126,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         layout.addStretch()
         control_widget = QWidget()
-        control_widget.setStyleSheet("background-color: #F8F9FF;")
+        control_widget.setStyleSheet(f"background-color: {colors.BACKGROUND_CONTENT};")
         self.control_layout = QVBoxLayout(control_widget)
         self.control_layout.setContentsMargins(0, 0, 0, 0)
         self.control_layout.setSpacing(12)
@@ -159,20 +180,33 @@ class IssueCredentialDialog(LocksmithDialog):
         self.issue_button.clicked.connect(self._on_primary_clicked)
 
         # Connect to vault signal bridge for doer events
-        if hasattr(self.app.vault, 'signals'):
-            self.app.vault.signals.doer_event.connect(self._on_doer_event)
+        if hasattr(self.vault, 'signals'):
+            self.vault.signals.doer_event.connect(self._on_doer_event)
             self._doer_event_connected = True
             logger.info("IssueCredentialDialog: Connected to vault signal bridge")
         else:
             self._doer_event_connected = False
 
         self.finished.connect(self._on_dialog_finished)
+        if request_said:
+            request = self.vault.hby.db.exns.get((request_said,))
+            schema = ipexing.request_schema(request)
+            self.schema_dropdown.setCurrentIndex(self.schema_dropdown.combo_box.findData(schema))
+            self.schema_dropdown.setEnabled(False)
+            self.local_radio.setChecked(request.pre in self.vault.hby.prefixes)
+            self.remote_radio.setChecked(request.pre not in self.vault.hby.prefixes)
+            if self.recipient_dropdown.combo_box.findData(request.pre) < 0:
+                self.recipient_dropdown.addItem(identifier_name(self.vault, request.pre), request.pre)
+            self.recipient_dropdown.setCurrentIndex(self.recipient_dropdown.combo_box.findData(request.pre))
+            self.recipient_dropdown.setEnabled(False)
+            self.local_radio.setEnabled(False)
+            self.remote_radio.setEnabled(False)
 
     def _disconnect_doer_event_signal(self):
         if not getattr(self, '_doer_event_connected', False):
             return
         try:
-            self.app.vault.signals.doer_event.disconnect(self._on_doer_event)
+            self.vault.signals.doer_event.disconnect(self._on_doer_event)
         except RuntimeError:
             pass
         self._doer_event_connected = False
@@ -181,7 +215,15 @@ class IssueCredentialDialog(LocksmithDialog):
         self._disconnect_doer_event_signal()
 
     def _on_primary_clicked(self):
-        if self._workflow_mode == "auth":
+        if not self._current_vault():
+            return
+        if self._workflow_mode == 'issued':
+            view = credentialing.credential(self.vault, self._issued_said)
+            self._grant_dialog = GrantCredentialDialog(self.app, self.parentWidget(), self._issued_said,
+                credential_name(view['schema']), view['sad']['i'])
+            self.close()
+            self._grant_dialog.open()
+        elif self._workflow_mode == "auth":
             self._submit_auth_step()
         else:
             self._on_issue()
@@ -253,6 +295,8 @@ class IssueCredentialDialog(LocksmithDialog):
             self.issue_button.setText("Issue Credential")
 
     def _submit_auth_step(self):
+        if not self._current_vault():
+            return
         if self._auth_panel is None:
             self._show_issue_step()
             return
@@ -268,6 +312,19 @@ class IssueCredentialDialog(LocksmithDialog):
         self.cancel_button.setEnabled(False)
         self._complete_issuance(codes=codes)
 
+    def _current_vault(self):
+        if self.app.vault is self.vault and not getattr(self.vault, 'closed', False):
+            return True
+        self.show_error("This vault is closed")
+        return False
+
+    def _update_authentication_help(self, _index=None):
+        self.authentication_help.setText({
+            'registry': 'A registry records credential status, including revocation.',
+            'anchor': 'A KEL anchor remains verifiable after issuer key rotation.',
+            'signature': 'For a transferable issuer, this signature requires the current signing keys.',
+        }[self.authentication_dropdown.currentData()])
+
     def _populate_schema_dropdown(self):
         """Populate the schema dropdown with loaded schemas from the vault."""
         self.schema_dropdown.clear()
@@ -275,9 +332,9 @@ class IssueCredentialDialog(LocksmithDialog):
 
         try:
             # Get all schemas from the database
-            for (said,), schemer in self.app.vault.hby.db.schema.getTopItemIter():
-                issuer_pre = self.app.vault.db.issuers.get(keys=(said,))
-                if not issuer_pre or self.app.vault.hby.habByPre(issuer_pre) is None:
+            for (said,), schemer in self.vault.hby.db.schema.getTopItemIter():
+                issuer_pre = self.vault.db.issuers.get(keys=(said,))
+                if not issuer_pre or self.vault.hby.habByPre(issuer_pre) is None:
                     continue
 
                 sed = schemer.sed
@@ -304,16 +361,14 @@ class IssueCredentialDialog(LocksmithDialog):
         try:
             if self.local_radio.isChecked():
                 for identifier in list_eligible_local_identifiers(self.app):
-                    display_text = f"{identifier['alias']} ({identifier['prefix']})"
+                    display_text = identifier_name(self.vault, identifier['prefix'])
                     self.recipient_dropdown.addItem(display_text, userData=identifier['prefix'])
             else:
                 # Populate with remote identifiers
-                remote_ids = self.app.vault.org.list()
+                remote_ids = self.vault.org.list()
                 for remote_id in remote_ids:
-                    alias = remote_id.get('alias', 'Unknown')
                     pre = remote_id.get('id', '')
-                    # Format: "Alias (prefix)"
-                    display_text = f"{alias} ({pre})"
+                    display_text = identifier_name(self.vault, pre)
                     self.recipient_dropdown.addItem(display_text, userData=pre)
 
         except Exception as e:
@@ -323,7 +378,8 @@ class IssueCredentialDialog(LocksmithDialog):
     def _on_recipient_type_changed(self):
         """Handle recipient type radio button selection changes."""
         # Refresh the recipient dropdown when type changes
-        self._populate_recipient_dropdown()
+        if self._current_vault():
+            self._populate_recipient_dropdown()
 
     def _parse_schema_fields(self, schema_said: str) -> list[dict]:
         """
@@ -342,7 +398,7 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         try:
             # Get schema from database using SAID
-            schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
+            schemer = self.vault.hby.db.schema.get(keys=(schema_said,))
             if not schemer:
                 logger.error(f"Schema {schema_said} not found")
                 self.show_error(f"Schema not found: {schema_said[:20]}...")
@@ -358,6 +414,7 @@ class IssueCredentialDialog(LocksmithDialog):
             if attributes_obj is None:
                 self.show_error("Schema has no attribute properties for this form")
                 return []
+            self._schema_supported = True
 
             # Get properties and required list
             properties = attributes_obj.get('properties', {})
@@ -365,7 +422,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
             # Filter and build field definitions
             field_defs = []
-            excluded_fields = {'d', 'i', 'dt', 'u'}
+            excluded_fields = {'d', 'i'}
 
             for prop_name, prop_def in properties.items():
                 if prop_name in excluded_fields:
@@ -375,9 +432,11 @@ class IssueCredentialDialog(LocksmithDialog):
                     'name': prop_name,
                     'description': prop_def.get('description', prop_name),
                     'type': prop_def.get('type', 'string'),
-                    'format': prop_def.get('format'),
+                    'format': prop_def.get('format', 'date-time' if prop_name == 'dt' else None),
                     'required': prop_name in required_fields,
-                    'const': prop_def.get('const', None)
+                    'const': prop_def.get('const', None),
+                    'minLength': prop_def.get('minLength', 0),
+                    'schema': prop_def,
                 }
                 field_defs.append(field_def)
 
@@ -404,7 +463,7 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         try:
             # Get schema from database using SAID
-            schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
+            schemer = self.vault.hby.db.schema.get(keys=(schema_said,))
             if not schemer:
                 logger.error(f"Schema {schema_said} not found")
                 # Don't show error here - _parse_schema_fields already handles this
@@ -475,7 +534,7 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         try:
             # Get schema from database using SAID
-            schemer = self.app.vault.hby.db.schema.get(keys=(schema_said,))
+            schemer = self.vault.hby.db.schema.get(keys=(schema_said,))
             if not schemer:
                 logger.error(f"Schema {schema_said} not found")
                 return {}
@@ -519,9 +578,11 @@ class IssueCredentialDialog(LocksmithDialog):
 
                 # Recursively extract const values from nested structure
                 extracted = self._extract_rules_block(prop_def)
-                if extracted:
+                if extracted is not None:
                     rules_block[prop_name] = extracted
 
+            if len(rules_block) == 1:
+                return {}
             _, rules_block = coring.Saider.saidify(sad=rules_block, label='d')
             logger.info(f"Parsed rules block with {len(rules_block)} rules from schema {schema_said}")
             return rules_block
@@ -563,10 +624,10 @@ class IssueCredentialDialog(LocksmithDialog):
     def _get_credentials_for_schema(self, schema_said: str) -> list[dict]:
         """Return active wallet credentials that use the requested schema."""
         result = []
-        for item in credentialing.credentials(self.app.vault):
+        for item in credentialing.credentials(self.vault):
             schema = item['sad']['s']
             said = schema.get('$id') if isinstance(schema, dict) else schema
-            if said != schema_said or item['status']['et'] != 'issued':
+            if said != schema_said or item['status']['et'] not in ('issued', 'authenticated'):
                 continue
             credential_said = item['sad']['d']
             title = (item.get('schema') or {}).get('title', 'Unknown Schema')
@@ -617,8 +678,35 @@ class IssueCredentialDialog(LocksmithDialog):
         label = field_def['description']
 
         # Add asterisk to label if required
-        if field_def['required']:
+        if field_def['required'] and (field_type != 'string' or field_def.get('minLength', 0)):
             label = f"{label} *"
+
+        if field_type == 'object':
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            heading = QLabel(label)
+            heading.setWordWrap(True)
+            layout.addWidget(heading)
+            definition = field_def.get('schema', {})
+            container.fields = {}
+            container.include = None
+            if not field_def['required']:
+                container.include = QCheckBox('Include ' + field_def['description'])
+                layout.addWidget(container.include)
+            for name, prop in definition.get('properties', {}).items():
+                child = dict(name=name, description=prop.get('description', name),
+                             type=prop.get('type', 'string'), format=prop.get('format'),
+                             required=name in definition.get('required', []),
+                             minLength=prop.get('minLength', 0), schema=prop)
+                widget = (attribute_view(child['description'], prop['const'], prop) if 'const' in prop
+                          else self._create_field_widget(child))
+                container.fields[name] = (widget, child)
+                layout.addWidget(widget)
+                if container.include is not None and 'const' not in prop:
+                    widget.setEnabled(False)
+                    container.include.toggled.connect(widget.setEnabled)
+            return container
 
         # Date-time fields
         if field_type == 'string' and field_format == 'date-time':
@@ -627,17 +715,17 @@ class IssueCredentialDialog(LocksmithDialog):
             widget.setCalendarPopup(True)
             widget.setDateTime(QDateTime.currentDateTime())
             widget.setMinimumHeight(50)
-            widget.setStyleSheet("""
-                QDateTimeEdit {
-                    border: 1px solid #CCCCCC;
+            widget.setStyleSheet(f"""
+                QDateTimeEdit {{
+                    border: 1px solid {colors.BORDER_NEUTRAL};
                     border-radius: 6px;
                     padding: 12px;
                     font-size: 14px;
-                    background-color: #F8F9FF;
-                }
-                QDateTimeEdit:focus {
-                    border: 2px solid #F57B03;
-                }
+                    background-color: {colors.BACKGROUND_CONTENT};
+                }}
+                QDateTimeEdit:focus {{
+                    border: 2px solid {colors.PRIMARY};
+                }}
             """)
 
             # Wrap in container with label
@@ -647,7 +735,7 @@ class IssueCredentialDialog(LocksmithDialog):
             container_layout.setSpacing(4)
 
             label_widget = QLabel(label)
-            label_widget.setStyleSheet("font-weight: bold; font-size: 12px; color: #636466;")
+            label_widget.setStyleSheet(f"font-weight: bold; font-size: 12px; color: {colors.TEXT_SECONDARY};")
             container_layout.addWidget(label_widget)
             container_layout.addWidget(widget)
 
@@ -671,22 +759,22 @@ class IssueCredentialDialog(LocksmithDialog):
         # Boolean fields
         elif field_type == 'boolean':
             widget = QCheckBox(label)
-            widget.setStyleSheet("""
-                QCheckBox {
+            widget.setStyleSheet(f"""
+                QCheckBox {{
                     font-size: 14px;
                     spacing: 8px;
-                }
-                QCheckBox::indicator {
+                }}
+                QCheckBox::indicator {{
                     width: 20px;
                     height: 20px;
-                    border: 2px solid #CCCCCC;
+                    border: 2px solid {colors.BORDER_NEUTRAL};
                     border-radius: 4px;
-                    background-color: #F8F9FF;
-                }
-                QCheckBox::indicator:checked {
-                    background-color: #F57B03;
-                    border-color: #F57B03;
-                }
+                    background-color: {colors.BACKGROUND_CONTENT};
+                }}
+                QCheckBox::indicator:checked {{
+                    background-color: {colors.PRIMARY};
+                    border-color: {colors.PRIMARY};
+                }}
             """)
             return widget
 
@@ -705,7 +793,7 @@ class IssueCredentialDialog(LocksmithDialog):
             container_layout.setSpacing(4)
 
             label_widget = QLabel(label)
-            label_widget.setStyleSheet("font-weight: bold; font-size: 12px; color: #636466;")
+            label_widget.setStyleSheet(f"font-weight: bold; font-size: 12px; color: {colors.TEXT_SECONDARY};")
             container_layout.addWidget(label_widget)
             container_layout.addWidget(widget)
 
@@ -753,6 +841,9 @@ class IssueCredentialDialog(LocksmithDialog):
             fields_label = QLabel("Credential Attributes")
             fields_label.setStyleSheet("font-weight: bold; font-size: 14px;")
             self.control_layout.addWidget(fields_label)
+            field_help = QLabel('Fields marked * need a value. Other text fields may be blank where the schema permits.')
+            field_help.setWordWrap(True)
+            self.control_layout.addWidget(field_help)
 
             self.control_layout.addSpacing(15)
 
@@ -825,6 +916,7 @@ class IssueCredentialDialog(LocksmithDialog):
 
         # Reset storage
         self._dynamic_field_widgets = {}
+        self._const_fields_values = {}
         self._edge_dropdowns = {}
         self.control_layout.setSpacing(0)
 
@@ -839,6 +931,9 @@ class IssueCredentialDialog(LocksmithDialog):
         """
         # Clear any previous errors
         self.clear_error()
+        if not self._current_vault():
+            return
+        self._schema_supported = False
 
         # Skip if invalid selection
         if index <= 0:
@@ -853,6 +948,23 @@ class IssueCredentialDialog(LocksmithDialog):
         if not schema_said:
             logger.warning("No SAID found for selected schema")
             return
+
+        schemer = self.vault.hby.db.schema.get(keys=(schema_said,))
+        properties = schemer.sed.get('properties', {})
+        requires_registry = 'rd' in schemer.sed.get('required', [])
+        permits_registry = 'rd' in properties or schemer.sed.get('additionalProperties', True)
+        issuer = self.vault.hby.habByPre(self.vault.db.issuers.get(keys=(schema_said,)))
+        modes = self.authentication_dropdown.combo_box
+        for index in range(modes.count()):
+            mode = modes.itemData(index)
+            enabled = permits_registry if mode == 'registry' else not requires_registry
+            if mode == 'anchor':
+                enabled = enabled and issuer is not None and issuer.kever.prefixer.transferable
+            modes.model().item(index).setEnabled(enabled)
+        if not modes.model().item(modes.currentIndex()).isEnabled():
+            preferred = ('registry' if requires_registry else
+                         'anchor' if modes.model().item(modes.findData('anchor')).isEnabled() else 'signature')
+            modes.setCurrentIndex(modes.findData(preferred))
 
         # Generate fields for this schema
         self._generate_dynamic_fields(schema_said)
@@ -872,12 +984,28 @@ class IssueCredentialDialog(LocksmithDialog):
         field_type = field_def['type']
         field_format = field_def.get('format')
 
+        if field_type == 'object':
+            if widget.include is not None and not widget.include.isChecked():
+                return None
+            result = {}
+            for name, (child, definition) in widget.fields.items():
+                value = (definition['schema']['const'] if 'const' in definition['schema']
+                         else IssueCredentialDialog._get_field_value(child, definition))
+                if value is not None and (value != '' or definition['required']):
+                    result[name] = value
+                if definition['required'] and value is None:
+                    raise ValueError(f"{definition['description']} is required")
+                if (isinstance(value, str) and (value or definition['required'])
+                        and len(value) < definition.get('minLength', 0)):
+                    raise ValueError(f"{definition['description']} needs at least {definition['minLength']} characters")
+            return result
+
         # Date-time fields (wrapped in container)
         if field_type == 'string' and field_format == 'date-time':
             if hasattr(widget, 'input_widget'):
                 # Extract from QDateTimeEdit
                 dt = widget.input_widget.dateTime()
-                return dt.strftime("%b %d, %Y %I:%M %p")  # ISO 8601 format
+                return dt.toUTC().toString(Qt.DateFormat.ISODateWithMs)
             return None
 
         # Array fields (wrapped in container)
@@ -933,7 +1061,7 @@ class IssueCredentialDialog(LocksmithDialog):
             value = self._get_field_value(widget, field_def)
 
             # Only include non-empty values
-            if value is not None and value != '':
+            if value is not None and (value != '' or (field_def['required'] and field_name != 'u')):
                 attributes[field_name] = value
 
         return attributes
@@ -967,6 +1095,8 @@ class IssueCredentialDialog(LocksmithDialog):
         """Handle Issue Credential button click."""
         # Clear any previous errors
         self.clear_error()
+        if not self._current_vault():
+            return
 
         # Validate fields
         if not self._validate_fields():
@@ -976,13 +1106,13 @@ class IssueCredentialDialog(LocksmithDialog):
         schema_index = self.schema_dropdown.currentIndex()
         schema_said = self.schema_dropdown.itemData(schema_index)
 
-        issuer_pre = self.app.vault.db.issuers.get(keys=(schema_said,))
-        hab = self.app.vault.hby.habByPre(issuer_pre) if issuer_pre else None
+        issuer_pre = self.vault.db.issuers.get(keys=(schema_said,))
+        hab = self.vault.hby.habByPre(issuer_pre) if issuer_pre else None
         if hab is None:
             self.show_error("Select a local issuer for this schema first")
             return
 
-        if hab.kever.wits:
+        if hab.kever.wits and self.authentication_dropdown.currentData() != 'signature':
             self._show_auth_step(hab)
             return
 
@@ -1008,6 +1138,9 @@ class IssueCredentialDialog(LocksmithDialog):
         self.recipient_dropdown.style().polish(self.recipient_dropdown)
 
         failed_fields = []
+        if not self._schema_supported:
+            self.show_error("This form requires a schema with an attribute object")
+            return False
 
         # Validate schema selection
         if self.schema_dropdown.currentIndex() <= 0:
@@ -1029,15 +1162,20 @@ class IssueCredentialDialog(LocksmithDialog):
                 field_def = field_info['field_def']
                 widget = field_info['widget']
 
-                # Only validate required fields
-                if not field_def['required']:
-                    continue
-
                 # Get value based on widget type
-                value = self._get_field_value(widget, field_def)
+                try:
+                    value = self._get_field_value(widget, field_def)
+                except (ValueError, TypeError) as error:
+                    self.show_error(f"{field_def['description']}: {error}")
+                    return False
 
                 # Check if empty
-                if value is None or value == '' or (isinstance(value, str) and not value.strip()):
+                invalid = field_def['required'] and value is None
+                if isinstance(value, str) and (value or field_def['required']):
+                    invalid |= len(value) < field_def['minLength']
+                if field_name == 'u' and value == '':
+                    invalid = False  # The issuer generates a nonce when none is supplied.
+                if invalid:
                     failed_fields.append(field_def['description'])
 
                     # Set error state on widget
@@ -1083,15 +1221,39 @@ class IssueCredentialDialog(LocksmithDialog):
             event_type: Type of event
             data: Event data dictionary
         """
+        if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
+            self._disconnect_doer_event_signal()
+            return
+        if (doer_name != 'IssueCredentialDoer' or self._issuance_id is None
+                or data.get('issuance_id') != self._issuance_id):
+            return
         logger.debug(f"IssueCredentialDialog received doer_event: {doer_name} - {event_type}")
 
         # Handle credential issuance success
-        if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
+        if event_type == "credential_issued":
+            self._issuance_id = None
             logger.info(f"Credential issued successfully: {data.get('credential_said')}")
-            self.close()
+            self._issued_said = data['credential_said']
+            if self.request_said:
+                self.credential_created.emit(self._issued_said)
+                self.accept()
+                return
+            self._workflow_mode = 'issued'
+            self.schema_dropdown.setEnabled(False)
+            self.authentication_dropdown.setEnabled(False)
+            self.local_radio.setEnabled(False)
+            self.remote_radio.setEnabled(False)
+            self.recipient_dropdown.setEnabled(False)
+            self.control_layout.parentWidget().setEnabled(False)
+            self.issue_button.setText('Grant…')
+            self.issue_button.setEnabled(True)
+            self.cancel_button.setText('Close')
+            self.cancel_button.setEnabled(True)
+            self.show_success('Credential created. Choose Grant to send it, or close to send it later.')
 
         # Handle credential issuance failure
-        elif doer_name == "IssueCredentialDoer" and event_type == "credential_issuance_failed":
+        elif event_type == "credential_issuance_failed":
+            self._issuance_id = None
             error_msg = data.get('error', 'Unknown error')
             logger.error(f"Credential issuance failed: {error_msg}")
 
@@ -1099,6 +1261,15 @@ class IssueCredentialDialog(LocksmithDialog):
             self.show_error(f"Failed to issue credential: {error_msg}")
 
     def _complete_issuance(self, codes=None):
+        if not self._current_vault():
+            return
+        if self.request_said:
+            request = self.vault.hby.db.exns.get((self.request_said,))
+            if ('Offer' not in ipexing.responses(self.vault, request)
+                    or self.vault.db.issuers.get((ipexing.request_schema(request),)) != request.sad['ri']):
+                self._set_primary_button_idle()
+                self.show_error('This request has changed. Return to Activity to review it.')
+                return
         # Get selected values
         schema_index = self.schema_dropdown.currentIndex()
         schema_said = self.schema_dropdown.itemData(schema_index)
@@ -1130,9 +1301,11 @@ class IssueCredentialDialog(LocksmithDialog):
                 edges=edges,
                 rules=rules,
                 codes=codes,
-                signal_bridge=self.app.vault.signals if hasattr(self.app.vault, 'signals') else None
+                authentication=self.authentication_dropdown.currentData(),
+                signal_bridge=self.vault.signals if hasattr(self.vault, 'signals') else None
             )
-            self.app.vault.extend([doer])
+            self._issuance_id = doer.issuance_id
+            self.vault.extend([doer])
 
             logger.info(f"IssueCredentialDoer started for schema {schema_said}")
 
