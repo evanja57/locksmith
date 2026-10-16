@@ -229,16 +229,17 @@ class VaultPage(BasePage):
     # Notifications
     # -------------------------------------------------------------------------
 
-    def show_credential_activity(self, said, *, received=None):
+    def show_credential_activity(self, said, *, received=None, open_dialog=True):
         self.nav_menu.switch_to_credentials_menu()
         self.nav_menu.activity_button.click()
-        self._pages['credential_activity'].show_exchange(said, received=received)
+        self._pages['credential_activity'].show_exchange(said, received=received, open_dialog=open_dialog)
 
-    def start_credential_exchange(self, action, *, schema=None, credential_said=None):
+    def start_credential_exchange(self, action, *, schema=None, credential_said=None, received=False):
         from locksmith.ui.vault.credentials.start import StartExchangeDialog
         self._credential_exchange_dialog = StartExchangeDialog(
-            self.app, self, action, schema=schema, credential_said=credential_said)
-        self._credential_exchange_dialog.submitted.connect(self.show_credential_activity)
+            self.app, self, action, schema=schema, credential_said=credential_said, received=received)
+        self._credential_exchange_dialog.submitted.connect(
+            lambda said: self.show_credential_activity(said, received=action == 'Apply', open_dialog=False))
         self._credential_exchange_dialog.open()
 
     def show_notifications(self):

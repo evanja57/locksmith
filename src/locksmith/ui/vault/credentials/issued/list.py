@@ -18,6 +18,7 @@ from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.issued.delete import DeleteIssuedCredentialDialog
 from locksmith.ui.vault.credentials.issued.grant import GrantCredentialDialog
 from locksmith.ui.vault.credentials.issued.issue import IssueCredentialDialog
+from locksmith.ui.vault.credentials.issued.revoke import RevokeCredentialDialog
 from locksmith.ui.vault.credentials.issued.view import ViewIssuedCredentialDialog
 
 if TYPE_CHECKING:
@@ -72,14 +73,13 @@ class IssuedCredentialsListPage(BaseListPage):
             show_search=True,
             show_add_button=True,
             add_button_text="Issue Credential",
-            row_actions=["View", "Offer", "Grant", "View exchange history", "Delete"],
+            row_actions=["View", "Offer", "Grant", "View exchange history", "Revoke", "Delete"],
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
-                "Send": ":/assets/material-icons/send.svg",
-                "Revoke": ":/assets/material-icons/remove_moderator.svg",
-                "Delete": ":/assets/material-icons/delete.svg",
-                "Export": ":/assets/material-icons/export.svg",
-                "Grant": ":/assets/material-icons/share.svg"
+                "Offer": ":/assets/material-icons/share.svg",
+                "Grant": ":/assets/material-icons/send.svg",
+                "View exchange history": ":/assets/material-icons/swap_horiz.svg",
+                "Delete": ":/assets/material-icons/delete.svg"
             }
         )
 
@@ -95,7 +95,7 @@ class IssuedCredentialsListPage(BaseListPage):
 
         logger.info("IssuedCredentialsListPage initialized with table widget")
 
-    def _load_issued_credentials_data(self):
+    def _load_issued_credentials_data(self, *, reset_page=False):
         """
         Load issued credentials data from the opened vault.
 
@@ -121,7 +121,7 @@ class IssuedCredentialsListPage(BaseListPage):
                 }
                 issued_credentials_data.append(cred_dict)
 
-            self.table.set_static_data(issued_credentials_data)
+            self.table.set_static_data(issued_credentials_data, reset_page=reset_page)
             logger.info(f"Loaded {len(issued_credentials_data)} issued credentials")
         except Exception as e:
             logger.exception(f"Error loading issued credentials data: {e}")
@@ -175,7 +175,8 @@ class IssuedCredentialsListPage(BaseListPage):
             except Exception as e:
                 logger.exception(f"Error opening grant dialog: {e}")
         elif action == "Revoke":
-            logger.info(f"Revoke issued credential: {credential_schema}")
+            dialog = RevokeCredentialDialog(self.app, credential_said, credential_schema, parent=self.parent)
+            dialog.open()
         elif action == "Delete":
             # Open delete confirmation dialog
             dialog = DeleteIssuedCredentialDialog(
@@ -207,7 +208,7 @@ class IssuedCredentialsListPage(BaseListPage):
 
         # Now that the vault is open and hby is available, load the data
         if self.app.vault and self.app.vault.hby:
-            self._load_issued_credentials_data()
+            self._load_issued_credentials_data(reset_page=True)
 
             # Connect to vault signal bridge for automatic list updates
             if hasattr(self.app.vault, 'signals'):
@@ -227,6 +228,9 @@ class IssuedCredentialsListPage(BaseListPage):
         """
         logger.debug(f"IssuedCredentialsListPage received doer_event: {doer_name} - {event_type}")
 
+        if doer_name == 'RegistryEvidence' and event_type == 'status_checked':
+            self._load_issued_credentials_data()
+
         # Refresh list when a credential is issued
         if doer_name == "IssueCredentialDoer" and event_type == "credential_issued":
             logger.info(
@@ -235,7 +239,7 @@ class IssuedCredentialsListPage(BaseListPage):
             self._load_issued_credentials_data()
 
         # Refresh list when a credential is revoked
-        elif doer_name == "RevokeCredentialDoer" and event_type == "credential_revoked":
+        elif doer_name == "RevokeCredentialDoer" and event_type in ("credential_revoked", "credential_revocation_failed"):
             logger.info(f"Credential revoked: {data.get('schema')}, refreshing list")
             self._load_issued_credentials_data()
 

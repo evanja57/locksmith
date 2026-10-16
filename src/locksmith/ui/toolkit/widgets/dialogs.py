@@ -744,15 +744,25 @@ class LocksmithDialog(QDialog):
         section.set_dialog_new(self)
 
     def fit_content(self, width):
-        """Fit collapsed content while leaving long reviews scrollable."""
-        self.resize(width, self.height())
+        """Fit current content and update the base height for collapsible sections."""
+        if self._dialog_resize_animation is not None:
+            self._dialog_resize_animation.stop()
+        self.setFixedWidth(width)
         self.layout().activate()
+        self.content_layout.invalidate()
+        self.content_layout.activate()
         chrome = self.sizeHint().height() - self.scroll_area.sizeHint().height()
         content_height = self.content_layout.totalHeightForWidth(width)
         if content_height < 0:
             content_height = self.content_layout.sizeHint().height()
         height = content_height + chrome + 12
-        self.resize(width, min(height, self._calculate_max_dialog_height()))
+        expanded_height = sum(item['section']._content_height for item in self._collapsible_sections
+                              if item['is_expanded'] and not item['section'].isHidden())
+        self._base_content_height = height - expanded_height
+        self._max_dialog_height = self._calculate_max_dialog_height()
+        self.setFixedSize(width, min(height, self._max_dialog_height))
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.center_on_parent()
 
     def on_section_toggle(self, section, is_expanded):
         """

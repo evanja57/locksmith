@@ -22,7 +22,7 @@ from locksmith.ui.toolkit.widgets import (
 )
 from locksmith.ui.toolkit.widgets.buttons import LocksmithRadioButton, LocksmithIconButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, FloatingLabelLineEdit
-from locksmith.ui.vault.credentials.presentation import attribute_view, identifier_name
+from locksmith.ui.vault.credentials.presentation import credential_details, disclosed_credentials, identifier_name
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 if TYPE_CHECKING:
@@ -87,21 +87,26 @@ class GrantCredentialDialog(LocksmithDialog):
         self.sharing_notice.setWordWrap(True)
         layout.addWidget(self.sharing_notice)
 
-        review = CollapsibleSection(title='Review credential details')
+        review = CollapsibleSection(title='Review data and terms to share')
         review_layout = QVBoxLayout()
-        view = credentialing.credential(self.vault, credential_said)
-        attrs = view['sad'].get('a', {})
-        if isinstance(attrs, dict):
-            for key, value in attrs.items():
-                if key not in ('d', 'i'):
-                    review_layout.addWidget(attribute_view(key, value))
+        disclosure_error = None
+        try:
+            nodes = disclosed_credentials(self.vault, credential_said)
+            for node in nodes:
+                review_layout.addWidget(credential_details(self.vault, node))
+            if len(nodes) > 1:
+                count = len(nodes) - 1
+                linked_notice = QLabel(f'This also shares the disclosed data and terms of {count} linked '
+                                       f'{"credential" if count == 1 else "credentials"}.')
+                linked_notice.setWordWrap(True)
+                layout.addWidget(linked_notice)
+        except Exception as error:
+            disclosure_error = f'Cannot prepare disclosure: {error}'
         review.set_content_layout(review_layout)
         layout.addWidget(review)
 
         self.options = CollapsibleSection(title='More options')
         options_layout = QVBoxLayout()
-        self.message_field = FloatingLabelLineEdit(label_text='Message (optional)')
-        options_layout.addWidget(self.message_field)
         radio_layout = QHBoxLayout()
         self.send_radio = LocksmithRadioButton('Send')
         self.send_radio.setChecked(True)
@@ -142,6 +147,9 @@ class GrantCredentialDialog(LocksmithDialog):
         self.fit_content(560)
         self.register_collapsible_section(review)
         self.register_collapsible_section(self.options)
+        if disclosure_error:
+            self.show_error(disclosure_error)
+            self.action_button.setEnabled(False)
         self.grant_type_group = QButtonGroup(self)
         self.grant_type_group.addButton(self.send_radio)
         self.grant_type_group.addButton(self.save_radio)
@@ -299,7 +307,7 @@ class GrantCredentialDialog(LocksmithDialog):
                 raise ValueError("The credential issuer is not a local identifier")
             serder, attachment = ipexing.grant(
                 self.vault, hab, self.credential_said,
-                self.recipient_dropdown.currentData(), self.message_field.text(),
+                self.recipient_dropdown.currentData(),
             )
             if self.send_radio.isChecked():
                 self._send_grant(hab, serder, attachment)
@@ -319,7 +327,7 @@ class GrantCredentialDialog(LocksmithDialog):
         self.vault.signals.doer_event.connect(self._on_doer_event)
         self._listening = True
         # A retry sends this same grant, including its recipient and message.
-        for field in (self.recipient_dropdown, self.message_field, self.send_radio, self.save_radio):
+        for field in (self.recipient_dropdown, self.send_radio, self.save_radio):
             field.setEnabled(False)
         self.action_button.setText("Sending...")
 

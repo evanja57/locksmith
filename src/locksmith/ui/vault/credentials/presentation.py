@@ -4,13 +4,23 @@ from collections.abc import Mapping
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from keri.help import helping
+from keri import kering
+from keri.core import Saider, parsing
 
+from locksmith.core import ipexing
 from locksmith.ui import colors
 
 
 def credential_name(schema):
     schema = schema or {}
     return schema.get('title', 'Credential')
+
+
+def attribute_label(name, schema):
+    """Use the same readable field names in forms and credential reviews."""
+    description = schema.get('description', 'Date' if name == 'dt' else name)
+    # Timestamp annotations describe wire encoding, not part of the field label.
+    return description.split(' RFC-3339')[0].split(' RFC3339')[0]
 
 
 def identifier_name(vault, pre):
@@ -40,6 +50,64 @@ def status_label(status):
             'authenticated': 'Authenticated'}.get(status.get('et'), 'Unknown state')
 
 
+def rules_text(rules):
+    """Keep disclosed terms readable without treating a commitment as rule text."""
+    if not isinstance(rules, Mapping):
+        try:
+            if Saider(qb64=rules).qb64 == rules:
+                return 'Rule text has not been disclosed.'
+        except Exception:
+            pass
+        return rules
+    values = {('Legal terms' if key == 'l' else key): value if key == 'l' else rules_text(value)
+              for key, value in rules.items() if key not in ('d', 'u')}
+    if list(values) == ['Legal terms']:
+        return values['Legal terms']
+    return values or 'Rule text has not been disclosed.'
+
+
+def disclosed_credentials(vault, said):
+    """Read the same retained nodes that the Grant builder will send."""
+    view, artifacts, _ = ipexing._credential_evidence(vault, said)
+    return [view['sad']] + [
+        parsing.Parser().parse(ims=bytearray(stream), processive=False,
+                               version=kering.Vrsn_2_0)[0].serder.sad
+        for stream in artifacts]
+
+
+def credential_details(vault, sad, *, identity=True):
+    """Show a retained credential's identity, disclosed attributes, and terms."""
+    schema = sad.get('s', {})
+    if isinstance(schema, str):
+        schemer = vault.hby.db.schema.get((schema,))
+        schema = schemer.sed if schemer else {}
+    widget = QWidget()
+    layout = QVBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 12)
+    if identity:
+        layout.addWidget(attribute_view(credential_name(schema), 'Issued by ' + identifier_name(vault, sad.get('i'))))
+    attrs = sad.get('a')
+    if isinstance(attrs, Mapping):
+        if identity:
+            layout.addWidget(attribute_view('Credential subject', identifier_name(vault, attrs.get('i'))))
+        definition = schema.get('properties', {}).get('a', {})
+        definition = definition if isinstance(definition, Mapping) else {}
+        definition = next((item for item in definition.get('oneOf', [definition])
+                           if isinstance(item, Mapping) and item.get('type') == 'object'), {})
+        for name, value in attrs.items():
+            if name in ('d', 'i', 'u'):
+                continue
+            prop = definition.get('properties', {}).get(name, {})
+            prop = prop if isinstance(prop, Mapping) else {}
+            layout.addWidget(attribute_view(attribute_label(name, prop), value, prop))
+    elif attrs is not None:
+        layout.addWidget(attribute_view('Attributes', 'Only a commitment is disclosed.'))
+    if 'A' in sad:
+        layout.addWidget(attribute_view('Disclosed aggregate', sad['A']))
+    layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
+    return widget
+
+
 def attribute_view(label, value, schema=None):
     """Display disclosed values without editable controls or JSON syntax."""
     schema = schema if isinstance(schema, Mapping) else {}
@@ -56,7 +124,7 @@ def attribute_view(label, value, schema=None):
         for name, item in value.items():
             prop = properties.get(name, {})
             prop = prop if isinstance(prop, Mapping) else {}
-            child = attribute_view(prop.get('description', name), item, prop)
+            child = attribute_view(attribute_label(name, prop), item, prop)
             child.layout().setContentsMargins(16, 0, 0, 8)
             layout.addWidget(child)
     elif isinstance(value, list):

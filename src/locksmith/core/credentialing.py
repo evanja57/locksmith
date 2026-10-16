@@ -1,6 +1,7 @@
 # -*- encoding: utf-8 -*-
 """Schema selection, native credential issuance, and the wallet's inventory."""
 from collections.abc import Mapping
+from copy import deepcopy
 import json
 from time import monotonic
 import uuid
@@ -11,7 +12,7 @@ from hio.base import doing
 from keri import help, kering
 from keri.acdc import Registrar, acdcmap, regeventing
 from keri.app.habbing import GroupHab
-from keri.core import (Blinder, BlindState, BoundState, Noncer, Number, SerderACDC,
+from keri.core import (Aggor, Blinder, BlindState, BoundState, Noncer, Number, SerderACDC,
                        SerderKERI, SealSource, messagize, parsing, scheming)
 from keri.help import helping
 from keri.peer import exchanging
@@ -20,6 +21,63 @@ from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.db.basing import IssuedCredential
 
 logger = help.ogler.getLogger(__name__)
+
+
+def schema_detail(definition, kind='object'):
+    """Find the expanded form of a compact-or-expanded section schema."""
+    if not isinstance(definition, Mapping):
+        return None
+    if definition.get('type') == kind:
+        return definition
+    for choice in definition.get('oneOf', definition.get('anyOf', [])):
+        if (detail := schema_detail(choice, kind)) is not None:
+            return detail
+    return None
+
+
+def attribute_schemas(schema, aggregate=False):
+    """Return attribute block definitions in the schema's declared order."""
+    properties = schema.get('properties', {})
+    if 'a' in properties and not aggregate:
+        detail = schema_detail(properties['a'])
+        if detail is None:
+            raise ValueError('The schema has no expanded attribute definition')
+        return [detail]
+    aggregate = schema_detail(properties.get('A'), 'array')
+    if aggregate is None:
+        raise ValueError('The schema has no expanded attributes or aggregate')
+    items = aggregate.get('items', {})
+    blocks = [detail for choice in items.get('anyOf', [items])
+              if (detail := schema_detail(choice)) is not None]
+    if not blocks:
+        raise ValueError('The aggregate schema has no attribute block definitions')
+    return blocks
+
+
+def complete_block(definition, values, issuee=None):
+    """Fill schema constants and native block identifiers without inventing data."""
+    result = deepcopy(values)
+    definition = schema_detail(definition) or {}
+    properties = definition.get('properties', {})
+    for name, prop in properties.items():
+        if 'const' in prop:
+            if name in result and result[name] != prop['const']:
+                raise ValueError(f'{name} does not match the schema constant')
+            result[name] = deepcopy(prop['const'])
+        elif name == 'd':
+            result.setdefault(name, '')
+        elif name == 'u':
+            if not result.get(name):
+                result[name] = Noncer().qb64
+        elif name == 'i' and issuee is not None:
+            if name in result and result[name] != issuee:
+                raise ValueError('The attribute issuee does not match the selected recipient')
+            result[name] = issuee
+        elif name in result and isinstance(result[name], Mapping):
+            result[name] = complete_block(prop, result[name])
+    if issuee is not None and 'i' in result and result['i'] != issuee:
+        raise ValueError('The attribute issuee does not match the selected recipient')
+    return result
 
 
 def validate_schema(vault, acdc):
@@ -31,6 +89,24 @@ def validate_schema(vault, acdc):
     # Validate fields without changing the credential's signed wire format.
     schemer.verify(raw=json.dumps(acdc.sad).encode())
     return schemer
+
+
+def require_registry_evidence(vault, acdc, hab):
+    """Require a recent independent status check before a wallet decision."""
+    from locksmith.core.registries import required
+
+    worker = getattr(vault, 'registry_evidence', None)
+    if worker is None:
+        return
+    for regk in required(acdc.sad):
+        if not worker.ensure(regk, hab):
+            detail = worker.errors.get(regk, 'Waiting for a current observer status check')
+            if not worker.observer_url:
+                detail = 'Configure an observer in Settings to check credential status'
+            raise kering.MissingChainError(detail)
+        rip = vault.rgy.store.seqEvent(regk, 0)
+        if rip is not None and rip.israid in vault.hby.prefixes and not worker.published(regk):
+            raise kering.MissingChainError('Waiting for the registrar to accept the issuer registry update')
 
 
 def credential_state(vault, acdc, blinder=None, *, blinders=None):
@@ -131,6 +207,7 @@ def credential(vault, said, received=False):
     schemer = (scheming.Schemer(sed=schema) if isinstance(schema, Mapping)
                else vault.hby.db.schema.get(keys=(schema,)))
     return {'sad': acdc.sad, 'schema': schemer.sed if schemer else {}, 'recipient': recipient,
+            'subject': acdc.iseaid, 'held': acdc.iseaid in vault.hby.prefixes,
             'created_at': created_at, 'accepted_at': accepted_at, 'sender': sender,
             'status': status, 'proof': proof, 'artifacts': artifacts}
 
@@ -205,7 +282,38 @@ class LoadSchemaDoer(doing.DoDoer):
                 manager.deleteLater()
 
 
-class IssueCredentialDoer(doing.DoDoer):
+class CredentialUpdateDoer(doing.DoDoer):
+    """Anchor a native registry event and collect its witness receipts."""
+
+    def anchor(self, registry, event, receiptor, auths):
+        hab = registry.hab
+        try:
+            sn, _ = regeventing.vetAnchor(event, db=self.vault.hby.db, issuer=hab.pre)
+            anchor = SerderKERI(raw=hab.msgOwnEvent(sn=sn))
+        except kering.MissingAnchorError:
+            seal = dict(i=registry.regk, s=event.sad['n'], d=event.said)
+            raw = hab.rotate(data=[seal]) if hab.kever.estOnly else hab.interact(data=[seal])
+            anchor = SerderKERI(raw=raw)
+        yield from self.receipt(hab, anchor, receiptor, auths)
+        if not registry.anchorMsg(event.said):
+            raise kering.ValidationError('Registry anchor is still pending')
+
+    def receipt(self, hab, anchor, receiptor, auths):
+        threshold = hab.kvy.fetchEstEvent(hab.pre, anchor.sn).bner.num
+        receipt = receiptor.receipt(hab.pre, sn=anchor.sn, auths=auths)
+        deadline = self.tyme + 30.0
+        try:
+            for _ in receipt:
+                if self.tyme >= deadline:
+                    raise TimeoutError('Witness receipts are still pending for the credential update')
+                yield self.tock
+        finally:
+            receipt.close()
+        if len(self.vault.hby.db.wigs.get(keys=(hab.pre, anchor.said))) < threshold:
+            raise kering.MissingChainError('Witness receipts are still pending for the credential update')
+
+
+class IssueCredentialDoer(CredentialUpdateDoer):
     """Issue a native credential with the selected issuer authentication factor."""
 
     def __init__(self, app, schema_said, recipient_pre, attributes, edges=None, rules=None,
@@ -234,16 +342,28 @@ class IssueCredentialDoer(doing.DoDoer):
             if schemer is None:
                 raise kering.ValidationError(f'Load credential schema {self.schema_said} before issuing it')
             properties = schemer.sed.get('properties', {})
-            attribute_schema = properties.get('a', {})
-            candidates = attribute_schema.get('oneOf', [attribute_schema])
-            attribute_schema = next((item for item in candidates
-                                     if isinstance(item, Mapping) and item.get('type') == 'object'), {})
-            attributes = {'d': '', **self.attributes}
-            attribute_properties = attribute_schema.get('properties', {})
-            if 'dt' in attribute_properties:
-                attributes.setdefault('dt', attribute_properties['dt'].get('const', helping.nowIso8601()))
-            if 'u' in attribute_properties:
-                attributes.setdefault('u', attribute_properties['u'].get('const', Noncer().qb64))
+            definitions = attribute_schemas(schemer.sed, aggregate=isinstance(self.attributes, list))
+            if isinstance(self.attributes, list) or 'a' not in properties:
+                if not isinstance(self.attributes, list):
+                    raise ValueError('Provide the aggregate attribute blocks as a list')
+                blocks = []
+                for values in self.attributes:
+                    matches = [definition for definition in definitions
+                               if set(values) - {'d', 'u'} <= definition.get('properties', {}).keys()]
+                    if len(matches) != 1:
+                        raise ValueError('Each aggregate block must match one schema definition')
+                    blocks.append(complete_block(matches[0], values, self.recipient_pre))
+                attributes = {'aggregate': Aggor(ael=['', *blocks], makify=True,
+                                                 kind=kering.Kinds.json).ael}
+            else:
+                values = {'d': '', **self.attributes}
+                if 'dt' in definitions[0].get('properties', {}):
+                    values.setdefault('dt', definitions[0]['properties']['dt'].get('const', helping.nowIso8601()))
+                if (self.recipient_pre is not None and
+                        ('i' in definitions[0].get('properties', {}) or
+                         definitions[0].get('additionalProperties', True))):
+                    values.setdefault('i', self.recipient_pre)
+                attributes = {'attribute': complete_block(definitions[0], values, self.recipient_pre)}
             nonce = self.nonce
             if nonce is None and 'u' in properties:
                 nonce = properties['u'].get('const', Noncer().qb64)
@@ -257,11 +377,10 @@ class IssueCredentialDoer(doing.DoDoer):
             if self.authentication == 'registry':
                 registrar = Registrar(rgy=self.vault.rgy)
                 registry = registrar.makeRegistry(name=uuid.uuid4().hex, prefix=hab.pre)
-            edges = {'d': '', **{name: {'n': edge['cred_said'], 's': edge['schema_said']}
-                                for name, edge in self.edges.items()}} if self.edges else None
+            edges = complete_block(properties.get('e', {}), {'d': '', **self.edges}) if self.edges else None
+            rules = complete_block(properties.get('r', {}), self.rules) if self.rules is not None else None
             acdc = acdcmap(israid=hab.pre, uuid=nonce, regid=registry.regk if registry else None, schema=self.schema_said,
-                           attribute=attributes,
-                           iseaid=self.recipient_pre, edge=edges, rule=self.rules)
+                           **attributes, edge=edges, rule=rules)
             schemer = validate_schema(self.vault, acdc)
             previous = self.vault.db.issued.get((acdc.said,))
             created_at = previous.created_at if previous else helping.nowIso8601()
@@ -310,25 +429,62 @@ class IssueCredentialDoer(doing.DoDoer):
             if receiptor is not None:
                 self.remove([receiptor])
 
-    def anchor(self, registry, event, receiptor, auths):
-        hab = registry.hab
-        seal = dict(i=registry.regk, s=event.sad['n'], d=event.said)
-        raw = (hab.rotate(data=[seal]) if hab.kever.estOnly else hab.interact(data=[seal]))
-        anchor = SerderKERI(raw=raw)
-        yield from self.receipt(hab, anchor, receiptor, auths)
-        if not registry.anchorMsg(event.said):
-            raise kering.ValidationError('Registry anchor is still pending')
 
-    def receipt(self, hab, anchor, receiptor, auths):
-        threshold = hab.kever.toader.num
-        receipt = receiptor.receipt(hab.pre, sn=anchor.sn, auths=auths)
-        deadline = self.tyme + 30.0
+class RevokeCredentialDoer(CredentialUpdateDoer):
+    """Retain and anchor one revocation, including retries after a vault close."""
+
+    def __init__(self, app, credential_said, codes=None):
+        self.vault = app.vault
+        self.credential_said = credential_said
+        self.revocation_id = uuid.uuid4().hex
+        self.codes = codes or []
+        super().__init__(doers=[doing.doify(self.revoke_do)])
+
+    def revoke_do(self, tymth, tock=0.0, **opts):
+        self.wind(tymth)
+        yield self.tock
+        receiptor = None
         try:
-            for _ in receipt:
-                if self.tyme >= deadline:
-                    raise TimeoutError('Witness receipts are still pending for credential issuance')
-                yield self.tock
+            record = self.vault.db.issued.get((self.credential_said,))
+            if record is None:
+                raise ValueError('This credential was not issued by this wallet')
+            acdc = SerderACDC(raw=record.raw.encode())
+            hab = self.vault.hby.habByPre(acdc.israid)
+            if hab is None or isinstance(hab, GroupHab):
+                raise ValueError('Revocation requires the individual local issuer')
+            registry = self.vault.rgy.regs.get(acdc.regid)
+            if registry is None or not record.blinder:
+                raise ValueError('This credential has no local revocable registry')
+            blinder = Blinder(clan=BlindState, qb64=record.blinder)
+            if blinder.state == 'revoked':
+                update = self.vault.rgy.store.event(record.update)
+                if update is None:
+                    raise kering.MissingChainError('The retained revocation update is missing')
+            else:
+                if credential(self.vault, acdc.said)['status']['et'] != 'issued':
+                    raise kering.ValidationError('Wait for verified issuance before revoking')
+                blinder, update = Registrar(rgy=self.vault.rgy).issue(registry, acdc, state='revoked')
+                record.blinder = blinder.qb64
+                record.update = update.said
+                record.stream = messagize(serder=acdc, bonds=[blinder.data], framed=False).decode()
+                # Keep the new private proof before any asynchronous receipt work.
+                self.vault.db.issued.pin(keys=(acdc.said,), val=record)
+            auths = {}
+            for entry in self.codes:
+                wit, code = entry.split(':', 1)
+                auths[wit] = f'{code}#{helping.nowIso8601()}'
+            receiptor = LocksmithReceiptor(hby=self.vault.hby)
+            self.extend([receiptor])
+            yield from self.anchor(registry, update, receiptor, auths)
+            if credential_state(self.vault, acdc, blinder).state != 'revoked':
+                raise kering.ValidationError('The registry does not verify this revocation')
+            self.vault.signals.emit_doer_event('RevokeCredentialDoer', 'credential_revoked', {
+                'revocation_id': self.revocation_id, 'credential_said': acdc.said, 'success': True})
+        except Exception as ex:
+            logger.exception('Credential revocation failed')
+            self.vault.signals.emit_doer_event('RevokeCredentialDoer', 'credential_revocation_failed', {
+                'revocation_id': self.revocation_id, 'credential_said': self.credential_said,
+                'error': str(ex), 'success': False})
         finally:
-            receipt.close()
-        if len(self.vault.hby.db.wigs.get(keys=(hab.pre, anchor.said))) < threshold:
-            raise kering.MissingChainError('Witness receipts are still pending for credential issuance')
+            if receiptor is not None:
+                self.remove([receiptor])

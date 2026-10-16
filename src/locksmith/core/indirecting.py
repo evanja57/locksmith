@@ -6,20 +6,31 @@ Mailbox director and supporting classes
 
 """
 import datetime
-import sys
-import traceback
+import time
+import functools
 
 from hio.base import doing
 from hio.help import decking
 from keri import help, kering
 from keri.app import httping, agenting
 from keri.app.habbing import GroupHab
-from keri.core import (parsing, routing)
+from keri.core import Diger, Texter, parsing, routing
 from keri.db import basing
 from keri.help import helping
 from ordered_set import OrderedSet as oset
+from locksmith.db.basing import MailboxFrame
 
 logger = help.ogler.getLogger()
+
+
+def receiving_endpoints(hab):
+    """Return the witnesses and mailboxes authorized by this identifier."""
+    if isinstance(hab, GroupHab) or not hab.accepted:
+        return set()
+    endpoints = set(hab.kever.wits)
+    endpoints.update(eid for (_, _, eid), end in hab.db.ends.getTopItemIter(
+        keys=(hab.pre, kering.Roles.mailbox)) if end.allowed)
+    return endpoints
 
 
 class MailboxDirector(doing.DoDoer):
@@ -37,10 +48,11 @@ class MailboxDirector(doing.DoDoer):
         exchanger: Instance for facilitating and managing exchanges between participants.
         rep: Manages replies, including state or record tracking.
         topics: List of topic identifiers for subscriptions or notifications.
-        pollers: List of poller instances for handling polling mechanisms.
+        pollers: One poller per local identifier and receiving endpoint.
         cues: Queue or deck for processing cues generated during message handling.
         ims: Default parser buffer. Mailbox frames are passed to the parser separately.
-        messages: Queue of complete messages received from mailbox pollers.
+        messages: Queue of (message, commit) pairs from mailbox pollers. commit
+            advances the poller's stored topic position once the raw frame is retained.
         rgy: Native registry manager owned by the vault.
         rtr: Router responsible for message routing to appropriate handlers or verifiers.
         rvy: Verifies routes for received messages and processes message verifications.
@@ -48,7 +60,7 @@ class MailboxDirector(doing.DoDoer):
         parser: Parses incoming data streams and delegates processing to relevant components.
     """
 
-    def __init__(self, hby, topics, rgy, kvy, exc, ims=None,
+    def __init__(self, hby, topics, rgy, kvy, exc, db, ims=None,
                  rep=None, cues=None, rvy=None, **kwa):
         """
         Initializes the MailboxDirector class, which is responsible for managing mailboxes,
@@ -69,12 +81,12 @@ class MailboxDirector(doing.DoDoer):
             **kwa: Additional keyword arguments passed to the parent class initializer.
         """
         self.hby = hby
+        self.db = db
         self.rgy = rgy
         self.exchanger = exc
         self.rep = rep
         self.topics = topics
         self.pollers = list()
-        self.prefixes = oset()
         self.cues = cues if cues is not None else decking.Deck()
 
         self.ims = ims if ims is not None else bytearray()
@@ -129,23 +141,40 @@ class MailboxDirector(doing.DoDoer):
         _ = (yield self.tock)
 
         while True:
-            for msg in self.processPollIter():
-                self.messages.append(msg)
+            wanted = {(hab.pre, eid): hab for hab in self.hby.habs.values()
+                      for eid in receiving_endpoints(hab)}
+            for poller in list(self.pollers):
+                if (poller.pre, poller.mailbox) not in wanted:
+                    self.remove_poller(poller.hab, poller.mailbox)
+            for (pre, eid), hab in wanted.items():
+                self.add_poller(hab, eid)
+            for item in self.processPollIter():
+                self.messages.append(item)
                 _ = (yield self.tock)
-            _ = (yield self.tock)
+            _ = (yield 1.0)
+
+    def add_pollers(self, hab):
+        """
+        Poll every witness and authorized mailbox of an accepted single identifier.
+
+        Group identifiers are not listened for yet.
+
+        Parameters:
+            hab: The habitat whose messages are polled.
+        """
+        for eid in receiving_endpoints(hab):
+            self.add_poller(hab, eid)
 
     def add_poller(self, hab, mailbox):
         """
-        Adds a new Poller instance to the current object and extends its structure with the new Poller.
-
-        This method creates a Poller object using the provided `hab` and `mailbox` parameters. The newly
-        created Poller is added to the `pollers` list and also extends the current object's iterable
-        structure.
+        Start polling mailbox for hab unless a poller for that pair already runs.
 
         Parameters:
-            hab: The habitat or context required to configure the Poller instance.
-            mailbox: The witness or source used by the Poller instance for polling activities.
+            hab: The habitat whose messages are polled.
+            mailbox: The witness or mailbox prefix to poll.
         """
+        if any(poller.pre == hab.pre and poller.mailbox == mailbox for poller in self.pollers):
+            return
 
         poller = Poller(hab=hab, topics=self.topics, mailbox=mailbox)
         self.pollers.append(poller)
@@ -156,14 +185,15 @@ class MailboxDirector(doing.DoDoer):
         Drain the messages queued by each mailbox poller.
 
         Yields:
-            One complete mailbox message at a time.
+            tuple: (message, commit) where commit records the message's topic
+                position after the raw frame is retained.
 
         """
         mail = []
         for poller in self.pollers:  # get responses from all behaviors
             while poller.msgs:
-                msg = poller.msgs.popleft()
-                mail.append(msg)
+                msg, topic, idx = poller.msgs.popleft()
+                mail.append((msg, functools.partial(poller.commit, topic, idx)))
 
         while mail:  # iteratively process each response in responses
             msg = mail.pop(0)
@@ -193,7 +223,15 @@ class MailboxDirector(doing.DoDoer):
 
         while True:
             while self.messages:
-                msg = bytearray(self.messages.popleft())
+                msg, commit = self.messages.popleft()
+                # Arrival order keeps a sender's KEL ahead of the messages it signs.
+                key = (f'{time.time_ns():020d}', Diger(ser=bytes(msg)).qb64)
+                self.db.inbox.put(key, MailboxFrame(Texter(raw=bytes(msg)).qb64))
+                if commit is not None:
+                    commit()
+                yield self.tock
+            for keys, frame in list(self.db.inbox.getTopItemIter()):
+                msg = bytearray(Texter(qb64=frame.raw).raw)
                 version = kering.Vrsn_2_0
                 try:
                     v1_body = (kering.sniff(msg) == kering.Colds.msg
@@ -209,9 +247,14 @@ class MailboxDirector(doing.DoDoer):
                             version=kering.Vrsn_2_0, processive=False)
                     except Exception:
                         version = kering.Vrsn_1_0
-                self.parser.parse(ims=msg, version=version, local=False)
+                try:
+                    self.parser.parse(ims=msg, version=version, local=False)
+                except Exception:
+                    logger.exception('Mailbox frame could not be processed')
+                # Native processing owns the message once the parser has run.
+                self.db.inbox.rem(keys)
                 yield self.tock
-            yield self.tock
+            yield 1.0
 
     def escrowDo(self, tymth=None, tock=0.0, **kwa):
         """
@@ -239,9 +282,8 @@ class MailboxDirector(doing.DoDoer):
                 self.rvy.processEscrowReply()
             self.exchanger.processEscrow()
             self.rgy.processEscrows()
-            # No receiver evidence fetcher consumes these transient cues yet.
             self.kvy.kramer.cues.clear()
-            self.exchanger.cues.clear()
+            # The vault registry worker consumes proof cues and retries escrow.
 
             yield
 
@@ -283,6 +325,8 @@ class Poller(doing.DoDoer):
     """
     Polls remote SSE endpoint for event that are KERI messages to be processed
 
+    Queued messages are (message, topic, index) tuples. The stored topic position
+    advances only through commit, after the director has parsed the message.
     """
 
     def __init__(self, hab, mailbox, topics, msgs=None, retry=1000, **kwa):
@@ -302,7 +346,9 @@ class Poller(doing.DoDoer):
         self.mailbox = mailbox
         self.topics = topics
         self.retry = retry
-        self.msgs = None if msgs is not None else decking.Deck()
+        self.error = ''
+        self.connected = False
+        self.msgs = msgs if msgs is not None else decking.Deck()
         self.times = dict()
 
         doers = [doing.doify(self.eventDo)]
@@ -339,11 +385,13 @@ class Poller(doing.DoDoer):
             try:
                 client, clientDoer = agenting.httpClient(self.hab, self.mailbox)
             except kering.MissingEntryError as e:
-                traceback.print_exception(e, file=sys.stderr)  # logging
-                yield self.tock
+                self.error = str(e)
+                self.connected = False
+                yield max(self.retry / 1000, 5.0)
                 continue
 
             self.extend([clientDoer])
+            self.error = ''
 
             topics = dict()
             q = dict(pre=self.pre, topics=topics)
@@ -386,9 +434,11 @@ class Poller(doing.DoDoer):
                 now = helping.nowUTC()
                 if now - created > datetime.timedelta(seconds=30):
                     self.remove([clientDoer])
+                    self.connected = False
                     break
 
                 while client.events:
+                    self.connected = True
                     evt = client.events.popleft()
                     if "retry" in evt:
                         self.retry = evt["retry"]
@@ -399,16 +449,39 @@ class Poller(doing.DoDoer):
                     msg = evt["data"]
                     tpc = evt["name"]
 
-                    if not idx or not msg or not tpc:
+                    if idx is None or not msg or tpc not in self.topics:
                         logger.error(f"bad mailbox event: {evt}")
                         continue
+                    try:
+                        idx = int(idx)
+                        if idx < 0:
+                            raise ValueError('Negative mailbox position')
+                    except (TypeError, ValueError):
+                        self.error = 'The mailbox returned an invalid message position.'
+                        continue
 
-                    self.msgs.append(msg.encode("utf=8"))
-                    yield self.tock
-
-                    witrec.topics[tpc] = int(idx)
+                    # Only the next query uses this in-memory position. The
+                    # stored one waits for commit.
+                    witrec.topics[tpc] = idx
                     self.times[tpc] = helping.nowUTC()
-                    self.hab.db.tops.pin((self.pre, self.mailbox), witrec)
+                    self.msgs.append((msg.encode("utf-8"), tpc, idx))
+                    yield self.tock
 
                 yield 0.25
             yield self.retry / 1000
+
+    def commit(self, topic, idx):
+        """
+        Store idx as the last processed index for topic, if it is newer.
+
+        Parameters:
+            topic (str): mailbox topic of the processed message.
+            idx (int): mailbox index of the processed message.
+        """
+        keys = (self.pre, self.mailbox)
+        record = self.hab.db.tops.get(keys)
+        if record is None:
+            record = basing.TopicsRecord(topics=dict())
+        if record.topics.get(topic, -1) < idx:
+            record.topics[topic] = idx
+            self.hab.db.tops.pin(keys, record)

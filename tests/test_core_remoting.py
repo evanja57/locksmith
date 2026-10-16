@@ -544,8 +544,11 @@ def test_resolve_oobi_blocking_uses_sync_doer_when_qtask_is_missing(monkeypatch)
 
 
 @pytest.mark.parametrize('transferable_endpoint', [False, True])
-def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transferable_endpoint):
+@pytest.mark.parametrize('transferable_owner', [False, True])
+def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transferable_endpoint,
+                                                 transferable_owner):
     from keri.app import forwarding
+    from locksmith.core import ipexing
     from locksmith.ui.vault.shared.export import export_identifier_to_cesr
 
     with (
@@ -553,7 +556,8 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         habbing.openHby(name='export-service', temp=True, version=kering.Vrsn_2_0) as service,
         habbing.openHby(name='export-recipient', temp=True, version=kering.Vrsn_2_0) as target,
     ):
-        hab = source.makeHab(name='owner', version=kering.Vrsn_2_0, kind=kering.Kinds.cesr)
+        hab = source.makeHab(name='owner', transferable=transferable_owner,
+                             version=kering.Vrsn_2_0, kind=kering.Kinds.cesr)
         mailbox = service.makeHab(name='mailbox', transferable=transferable_endpoint,
                                  version=kering.Vrsn_2_0)
         unrelated = source.makeHab(name='unrelated', version=kering.Vrsn_2_0)
@@ -563,6 +567,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
                                                 version=kering.Vrsn_2_0),
                          version=kering.Vrsn_2_0)
         source.psr.parse(ims=hab.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox,
+                                           stamp='2026-10-09T00:00:00.000000+00:00',
                                            version=kering.Vrsn_2_0), version=kering.Vrsn_2_0)
         org = organizing.Organizer(hby=target)
         app = SimpleNamespace(vault=SimpleNamespace(hby=target, org=org))
@@ -589,6 +594,7 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
                             lambda *args, **kwargs: (str(path), 'CESR Files (*.cesr)'))
         export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
         assert path.read_bytes() == remoting.identifier_introduction(hab)
+        active_introduction = path.read_bytes()
         import_contact()
         assert target.db.ends.get(keys=(hab.pre, 'mailbox', mailbox.pre)).allowed is True
         assert target.db.locs.get(keys=(mailbox.pre, 'http')).url == 'http://127.0.0.1:9999'
@@ -598,3 +604,35 @@ def test_identifier_export_repairs_delivery_routes(tmp_path, monkeypatch, transf
         assert sender.endsFor(hab.pre)['mailbox'][mailbox.pre]['http'] == 'http://127.0.0.1:9999'
         poster.send(sender.iserder, attachment=attachment, gvrsn=kering.Vrsn_2_0)
         assert len(poster.evts) == 1  # Resolve/queue only; no network delivery.
+
+        # Refresh must carry the signed cut to a contact that knows the old route.
+        keys = (hab.pre, kering.Roles.mailbox, mailbox.pre)
+        source.psr.parse(ims=hab.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox,
+                                           stamp='2026-10-09T00:00:01.000000+00:00',
+                                           allow=False, version=kering.Vrsn_2_0),
+                         version=kering.Vrsn_2_0)
+        cut = source.db.eans.get(keys=keys)
+        assert source.db.ends.get(keys=keys).allowed is False
+        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
+        import_contact()
+        assert target.db.ends.get(keys=keys).allowed is False
+
+        assert target.db.eans.get(keys=keys).qb64 == cut.qb64
+        assert target.db.rpys.get(keys=(cut.qb64,)).raw == source.db.rpys.get(keys=(cut.qb64,)).raw
+        with pytest.raises(ipexing.MissingRouteError):
+            ipexing._require_route(sender, hab.pre, reply=False)
+        import_contact()
+        assert target.db.ends.get(keys=keys).allowed is False
+
+        path.write_bytes(active_introduction)
+        import_contact()
+        assert target.db.ends.get(keys=keys).allowed is False
+
+        # A later signed authorization restores the same route.
+        source.psr.parse(ims=hab.makeEndRole(eid=mailbox.pre, role=kering.Roles.mailbox,
+                                           stamp='2026-10-09T00:00:02.000000+00:00',
+                                           version=kering.Vrsn_2_0), version=kering.Vrsn_2_0)
+        export_identifier_to_cesr(None, SimpleNamespace(vault=SimpleNamespace(hby=source)), 'owner')
+        import_contact()
+        assert target.db.ends.get(keys=keys).allowed is True
+        ipexing._require_route(sender, hab.pre, reply=False)

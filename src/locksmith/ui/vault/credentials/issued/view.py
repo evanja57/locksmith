@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from locksmith.ui import colors
 from locksmith.core import credentialing
-from locksmith.ui.vault.credentials.presentation import attribute_view, credential_name, identifier_name, date_label, status_label
+from locksmith.ui.vault.credentials.presentation import attribute_view, credential_details, credential_name, identifier_name, date_label, status_label
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 
 from locksmith.ui.toolkit.widgets import (
@@ -103,27 +103,19 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
         self._build_issuer_section(layout)
         self._build_recipient_section(layout)
+        if self.received:
+            layout.addWidget(attribute_view('Received by', identifier_name(self.app.vault, self.credential['recipient'])))
         self._build_status_section(layout)
         self._build_issued_date_section(layout)
-        attributes = self.credential['sad'].get('a', {})
-        schema = self.credential.get('schema') or {}
-        definition = schema.get('properties', {}).get('a', {})
-        definition = definition if isinstance(definition, dict) else {}
-        definition = next((item for item in definition.get('oneOf', [definition])
-                           if isinstance(item, dict) and item.get('type') == 'object'), {})
-        for name, value in attributes.items() if isinstance(attributes, dict) else []:
-            if name in ('d', 'i'):
-                continue
-            prop = definition.get('properties', {}).get(name, {})
-            prop = prop if isinstance(prop, dict) else {}
-            layout.addWidget(attribute_view(prop.get('description', name), value, prop))
+        layout.addWidget(credential_details(self.app.vault, self.credential['sad'], identity=False))
         verification = CollapsibleSection(title='Verification details')
         details = QVBoxLayout()
         auth = self.credential['status'].get('auth')
         details.addWidget(QLabel('Authentication: ' + {'anchor': 'Issuer KEL anchor',
             'signature': 'Issuer signature', 'registry': 'Registry'}.get(auth, 'Not currently verified')))
         for label, pre in (('Issuer AID', self.credential['sad']['i']),
-                           ('Recipient AID', self.credential['recipient'])):
+                           ('Credential subject AID', self.credential['subject']),
+                           ('Received by AID', self.credential['recipient'] if self.received else None)):
             if pre:
                 row = QHBoxLayout()
                 text = QLabel(f'{label}: {pre}')
@@ -196,17 +188,15 @@ class ViewIssuedCredentialDialog(LocksmithDialog):
 
     def _build_recipient_section(self, layout):
         """Build the recipient section."""
-        recipient_label = QLabel("Recipient")
+        recipient_label = QLabel("Credential subject")
         recipient_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(recipient_label)
 
-        # Get recipient from credential attributes
-        attributes = self.credential['sad'].get('a', {})
-        recipient_pre = attributes.get('i', '') if isinstance(attributes, dict) else ''
+        recipient_pre = self.credential['subject']
 
         recipient_display = identifier_name(self.app.vault, recipient_pre)
 
-        self.recipient_field = LocksmithLineEdit("Recipient")
+        self.recipient_field = LocksmithLineEdit("Credential subject")
         self.recipient_field.setText(recipient_display)
         self.recipient_field.setReadOnly(True)
         self.recipient_field.setCursorPosition(0)

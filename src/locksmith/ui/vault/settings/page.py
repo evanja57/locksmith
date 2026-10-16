@@ -5,6 +5,7 @@ locksmith.ui.vault.settings.page module
 Settings content page (displayed within VaultPage container).
 """
 import re
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QPalette, QColor
@@ -89,6 +90,7 @@ class SettingsPage(QWidget):
 
         # Add the actual settings content
         self._create_general_settings_section(content_layout)
+        self._create_registry_section(content_layout)
         self._create_danger_zone_section(content_layout)
         
         # Push version to bottom
@@ -99,6 +101,42 @@ class SettingsPage(QWidget):
         main_layout.addWidget(scroll_area)
 
         logger.info("SettingsPage initialized")
+
+    def _create_registry_section(self, layout):
+        layout.addWidget(QLabel('Credential status services'))
+        description = QLabel('Publish issuer registry updates to a registrar. Check received credential status '
+                             'through an observer. These settings apply to this vault.')
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.registrar_url = FloatingLabelLineEdit('Registrar publication URL')
+        self.observer_url = FloatingLabelLineEdit('Observer URL')
+        layout.addWidget(self.registrar_url)
+        layout.addWidget(self.observer_url)
+        self.registry_notice = QLabel()
+        self.registry_notice.setWordWrap(True)
+        layout.addWidget(self.registry_notice)
+        save = LocksmithButton('Save status services')
+        save.clicked.connect(self._save_registry_services)
+        layout.addWidget(save)
+
+    def _save_registry_services(self):
+        vault = self.app.vault if self.app else None
+        if vault is None or vault.closed:
+            self.registry_notice.setText('Open a vault first.')
+            return
+        values = {'registrar': self.registrar_url.text().strip().rstrip('/'),
+                  'observer': self.observer_url.text().strip().rstrip('/')}
+        for value in values.values():
+            url = urlsplit(value)
+            if value and (not url.hostname or url.username or url.password or url.query or url.fragment or
+                          not (url.scheme == 'https' or url.scheme == 'http' and
+                               url.hostname in ('localhost', '127.0.0.1', '::1'))):
+                self.registry_notice.setText('Use HTTPS, or HTTP with a local loopback address.')
+                return
+        config = vault.hby.cf.get()
+        config['registries'] = values
+        vault.hby.cf.put(config)
+        self.registry_notice.setText('Saved. Status checks use these services.')
 
     def _create_general_settings_section(self, parent_layout: QVBoxLayout):
         """Create the General Settings section with form fields."""
@@ -628,6 +666,10 @@ class SettingsPage(QWidget):
         """
         self.vault_name = vault_name
         logger.info(f"SettingsPage: Set vault name to {vault_name}")
+        services = self.app.vault.hby.cf.get().get('registries', {}) if self.app and self.app.vault else {}
+        self.registrar_url.setText(services.get('registrar', ''))
+        self.observer_url.setText(services.get('observer', ''))
+        self.registry_notice.clear()
 
         # Load existing browser plugin settings if available
         if ENABLE_TURRET_BROWSER_PLUGIN and self.app and self.app.vault and self.app.vault.pluginSettings:

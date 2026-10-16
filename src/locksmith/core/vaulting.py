@@ -22,7 +22,7 @@ from keri.app import (
 from keri.core import routing as keriRouting, eventing, coring, kraming
 from keri.peer import exchanging
 
-from locksmith.core import indirecting, challenging, ipexing
+from locksmith.core import indirecting, challenging, ipexing, registries
 from locksmith.core.adjudication import Watchmen, KeyStateVarianceAuthority
 from locksmith.core.configing import ENABLE_TURRET_BROWSER_PLUGIN
 from locksmith.core.grouping import CounselingCompletionDoer
@@ -30,7 +30,7 @@ from locksmith.core.receipting import LocksmithReceiptor
 from locksmith.core.signals import DoerSignalBridge
 from locksmith.core.tasking import QtTask
 from locksmith.core.turretting import TurretDoer
-from locksmith.db.basing import LocksmithBaser, MailboxListener, BrowserPluginSettings
+from locksmith.db.basing import LocksmithBaser, BrowserPluginSettings
 
 logger = help.ogler.getLogger(__name__)
 
@@ -144,6 +144,8 @@ class Vault(doing.DoDoer):
 
         # Exchange handling
         self.exc = exchanging.Exchanger(hby=hby, handlers=[])
+        # Allow network evidence retrieval without changing the replay window.
+        self.exc.TimeoutPSE = 300
 
         # Load protocol handlers
         grouping.loadHandlers(exc=self.exc, mux=self.mux)
@@ -162,9 +164,11 @@ class Vault(doing.DoDoer):
         watchmen = Watchmen(hby=hby, tock=15.0)
         kva = KeyStateVarianceAuthority(hby=hby, notifier=self.notifier, cues=watchmen.cues)
 
-        # Mailbox director
+        # Mailbox director. It listens through every local identifier's witnesses
+        # and authorized mailboxes.
         self.mbx = indirecting.MailboxDirector(
             hby=self.hby,
+            db=self.db,
             topics=['/receipt', '/multisig', '/replay', '/delegate', '/credential', '/challenge', '/reply'],
             exc=self.exc,
             kvy=self.kvy,
@@ -174,6 +178,7 @@ class Vault(doing.DoDoer):
 
         # Notification toast doer
         self.toast_doer = NotificationToastDoer(vault=self)
+        self.registry_evidence = registries.RegistryEvidenceDoer(self)
         self.ipex_outbox = ipexing.IpexOutboxDoer(self)
         self.turrent_doer: TurretDoer | None = None
         if ENABLE_TURRET_BROWSER_PLUGIN and self.pluginSettings is not None:
@@ -196,6 +201,7 @@ class Vault(doing.DoDoer):
             watchmen,
             kva,
             self.mbx,
+            self.registry_evidence,
             self.ipex_outbox,
             kraming.Pruner(self.kramer, tock=1.0),
             self.toast_doer,
@@ -220,23 +226,6 @@ class Vault(doing.DoDoer):
         self.doers.extend(list(self.counseling_completion_doers.values()))
 
         logger.info(f"Vault initialized for {hby.name} with {len(self.doers)} doers")
-
-    def load_active_mailboxes(self):
-        """Load active mailbox listeners from db."""
-        for (eid,), mbl in self.db.mbx.getTopItemIter():
-            hab = self.hby.habByPre(mbl.cid)
-            if hab is not None:
-                self.activate_mailbox(hab, mbl.name, eid)
-
-    def activate_mailbox(self, hab, mailbox_name, mailbox_eid):
-        mbl = MailboxListener(cid=hab.pre, eid=mailbox_eid, name=mailbox_name)
-        self.db.mbx.pin(keys=(mailbox_eid,), val=mbl)
-
-        self.mbx.add_poller(hab=hab, mailbox=mailbox_eid)
-
-    def deactivate_mailbox(self, hab, mailbox_eid):
-        self.db.mbx.rem(keys=(mailbox_eid,))
-        self.mbx.remove_poller(hab=hab, mailbox=mailbox_eid)
 
     def update_plugin_identifier(self, plugin_identifier):
         if not ENABLE_TURRET_BROWSER_PLUGIN:
@@ -277,7 +266,6 @@ class NotificationToastDoer(doing.Doer):
         """Called when doer starts."""
         logger.info("NotificationToastDoer started")
         self._remember_notifications()
-        self.vault.load_active_mailboxes()
 
     def recur(self, tyme):
         """Called every tock (3 seconds) to check for new notifications."""

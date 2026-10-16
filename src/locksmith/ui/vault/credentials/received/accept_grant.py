@@ -5,7 +5,6 @@ locksmith.ui.vault.credentials.received.accept_grant module
 Dialog for accepting and admitting credentials from IPEX grant messages.
 """
 from typing import TYPE_CHECKING
-import json
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -21,8 +20,7 @@ from locksmith.ui.toolkit.widgets import (
     LocksmithButton,
     LocksmithInvertedButton
 )
-from locksmith.ui.toolkit.widgets.fields import LocksmithPlainTextEdit
-from locksmith.ui.vault.credentials.presentation import attribute_view, credential_name, identifier_name, date_label
+from locksmith.ui.vault.credentials.presentation import credential_details, credential_name, identifier_name, date_label
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
 from locksmith.ui.toolkit.widgets.buttons import LocksmithCopyButton
 
@@ -80,7 +78,7 @@ class AcceptGrantDialog(LocksmithDialog):
         # Initialize parent dialog
         super().__init__(
             parent=self.parent_widget,
-            title="Add credential",
+            title="Review credential",
             title_icon=":/assets/material-icons/in-badge.svg",
             content=self.content,
             buttons=self.button_row,
@@ -89,8 +87,12 @@ class AcceptGrantDialog(LocksmithDialog):
         )
 
         self.fit_content(560)
-        for section in (self.credential_details, self.reply, self.verification):
+        for section in (self.credential_details, self.verification):
             self.register_collapsible_section(section)
+        self.credential_details.toggle_button.setChecked(True)
+        self.content.layout().invalidate()
+        self.content.layout().activate()
+        self.fit_content(560)
 
         # Connect signals
         self.cancel_button.clicked.connect(self.close)
@@ -111,10 +113,8 @@ class AcceptGrantDialog(LocksmithDialog):
         credential = ipexing.grant_credential(self.vault, self.grant_said)
         self.sender = exn.sad['i']
         self.recipient = exn.sad['ri']
-        self.message = exn.sad['a'].get('m', '')
         self.timestamp = exn.sad.get('dt', '')
         self.requires_anchor = (exn.sad['a'].get('ax', [False])[0]
-                                and self.vault.db.receipts.get((self.recipient, self.grant_said)) is None
                                 and self.vault.hby.db.erpy.get((self.grant_said,)) is None)
         self.acdc_ked = credential.sad
         self.credential_said = credential.said
@@ -126,7 +126,7 @@ class AcceptGrantDialog(LocksmithDialog):
         else:
             schemer = self.vault.hby.db.schema.get(keys=(schema,))
             self.schema = schemer.sed if schemer is not None else {}
-        self.credential_attrs = credential.sad.get('a', {})
+        self.subject = credential.iseaid
         nest = next(item for item in exchanging.loadParsedNestedSubstreams(self.vault.hby, self.grant_said)
                     if item.serder.said == self.credential_said)
         try:
@@ -185,19 +185,16 @@ class AcceptGrantDialog(LocksmithDialog):
         participants = f'From {sender}'
         if self.sender != self.issuer:
             participants += f' · Issued by {identifier_name(self.vault, self.issuer)}'
-        participants += f'\nFor {identifier_name(self.vault, self.recipient)}'
+        subject = identifier_name(self.vault, self.subject)
+        participants += f'\nCredential subject: {subject}\nReceived by {identifier_name(self.vault, self.recipient)}'
         names = QLabel(participants)
         names.setTextFormat(Qt.TextFormat.PlainText)
         names.setWordWrap(True)
         names.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
         layout.addWidget(names)
-        if self.message.strip():
-            message = QLabel(self.message)
-            message.setTextFormat(Qt.TextFormat.PlainText)
-            message.setWordWrap(True)
-            layout.addWidget(message)
-        notice = QLabel('Adds to your wallet and exports a receipt. Nothing is sent.' if self.save else
-                        f'Adds to your wallet and confirms receipt to {sender}.')
+        notice = QLabel('Review the values below before adding this credential.\n' + (
+                        'Adding it exports a receipt. No acknowledgment is sent.' if self.save else
+                        f'Adding it confirms receipt to {sender}.'))
         notice.setTextFormat(Qt.TextFormat.PlainText)
         notice.setWordWrap(True)
         layout.addWidget(notice)
@@ -216,16 +213,11 @@ class AcceptGrantDialog(LocksmithDialog):
             warning.setStyleSheet(f'color: {colors.WARNING_TEXT};')
             layout.addWidget(warning)
 
-        self.credential_details = CollapsibleSection(title='Review credential details')
+        self.credential_details = CollapsibleSection(title='Review credential data and terms')
         attributes = QVBoxLayout()
         self._create_credential_fields_section(attributes)
         self.credential_details.set_content_layout(attributes)
         layout.addWidget(self.credential_details)
-        self.reply = CollapsibleSection(title='Add a message')
-        reply_layout = QVBoxLayout()
-        self._create_response_message_section(reply_layout)
-        self.reply.set_content_layout(reply_layout)
-        layout.addWidget(self.reply)
         self._create_credential_details_section(layout)
 
         self.delivery_notice = QLabel('Delivery retries automatically. Follow progress in Activity.')
@@ -261,7 +253,7 @@ class AcceptGrantDialog(LocksmithDialog):
         try:
             if not self._can_decline():
                 raise ValueError('This exchange has changed. Return to Activity to review it.')
-            ipexing.respond(self.vault, self.grant_said, 'Spurn', self.response_message_field.toPlainText().strip())
+            ipexing.respond(self.vault, self.grant_said, 'Spurn')
             self.accept()
         except Exception as error:
             self.show_error(str(error))
@@ -287,32 +279,9 @@ class AcceptGrantDialog(LocksmithDialog):
         layout.addWidget(self.verification)
 
     def _create_credential_fields_section(self, layout: QVBoxLayout):
-        """Show disclosed attributes with labels from the loaded schema."""
-        if not isinstance(self.credential_attrs, dict):
-            content = LocksmithPlainTextEdit()
-            content.setReadOnly(True)
-            content.setPlainText(json.dumps(self.acdc_ked, indent=2))
-            content.setMinimumHeight(200)
-            layout.addWidget(content)
-            return
-
-        if not self.schema:
-            layout.addWidget(QLabel("Load this credential's schema before accepting it"))
-        definition = self.schema.get('properties', {}).get('a', {})
-        definition = definition if isinstance(definition, dict) else {}
-        definition = next((item for item in definition.get('oneOf', [definition])
-                           if isinstance(item, dict) and item.get('type') == 'object'), {})
-        for name, value in self.credential_attrs.items():
-            if name in ('d', 'i'):
-                continue
-            prop = definition.get('properties', {}).get(name, {})
-            prop = prop if isinstance(prop, dict) else {}
-            layout.addWidget(attribute_view(prop.get('description', name), value, prop))
-
-    def _create_response_message_section(self, layout: QVBoxLayout):
-        self.response_message_field = LocksmithPlainTextEdit("Optional message")
-        self.response_message_field.setMaximumHeight(100)
-        layout.addWidget(self.response_message_field)
+        """Show the actual origin and linked nodes received in this Grant."""
+        for nest in exchanging.loadParsedNestedSubstreams(self.vault.hby, self.grant_said):
+            layout.addWidget(credential_details(self.vault, nest.serder.sad))
 
     def _on_admit(self):
         """Handle Admit button click"""
@@ -321,26 +290,35 @@ class AcceptGrantDialog(LocksmithDialog):
             return
         # Disable button during processing
         self.admit_button.setEnabled(False)
+        self.clear_error()
         self.admit_button.setText("Processing...")
         self.decline_button.setEnabled(False)
 
         logger.info(f"Admitting credential {self.credential_said}")
 
-        # Get optional message from text field
-        message = self.response_message_field.toPlainText().strip()
-
         if self.save:
-            # Save-only mode: create admit synchronously
-            self._save_admit_sync(message)
+            # Accept and export the acknowledgment when ready.
+            self._save_admit_sync()
         else:
             # Send the acknowledgment after acceptance
-            self._send_admit_async(message)
+            self._send_admit_async()
 
-    def _save_admit_sync(self, message: str):
+    def _save_admit_sync(self):
         """Accept the credential and save its signed acknowledgment."""
         try:
             hab = self.vault.hby.habByPre(self.recipient)
-            serder, attachment = ipexing.admit(self.vault, hab, self.grant_said, message)
+            serder, attachment = ipexing.admit(self.vault, hab, self.grant_said)
+            receipt = self.vault.db.receipts.get((hab.pre, self.grant_said))
+            if receipt.status != 'accepted':
+                self._pending_said = serder.said
+                if not self._listening:
+                    self.vault.signals.doer_event.connect(self._on_doer_event)
+                    self._listening = True
+                self.delivery_notice.setText('Waiting for witness receipts before accepting and exporting.')
+                self.delivery_notice.show()
+                self.admit_button.setText('Waiting for witnesses...')
+                return
+            self._disconnect()
             stream = ipexing.prepare(self.vault, hab, serder, attachment)
             self.vault.signals.emit_doer_event("Ipex", "accepted", {'said': serder.said})
             self._save_admit_to_file(serder.said, stream)
@@ -349,16 +327,17 @@ class AcceptGrantDialog(LocksmithDialog):
             self.show_error(f"Failed to accept credential: {error}")
             self._reset_button()
 
-    def _send_admit_async(self, message: str):
+    def _send_admit_async(self):
         """Accept the credential and submit its acknowledgment for delivery."""
         try:
             if self._pending_said:
                 ipexing.retry(self.vault, self._pending_said)
             else:
                 hab = self.vault.hby.habByPre(self.recipient)
-                serder, _ = ipexing.admit(self.vault, hab, self.grant_said, message, send=True)
+                serder, _ = ipexing.admit(self.vault, hab, self.grant_said, send=True)
                 self._pending_said = serder.said
-                self.vault.signals.emit_doer_event("Ipex", "accepted", {'said': serder.said})
+                if self.vault.db.receipts.get((hab.pre, self.grant_said)).status == 'accepted':
+                    self.vault.signals.emit_doer_event("Ipex", "accepted", {'said': serder.said})
                 self.vault.signals.doer_event.connect(self._on_doer_event)
                 self._listening = True
             self.cancel_button.setText("Close")
@@ -367,7 +346,6 @@ class AcceptGrantDialog(LocksmithDialog):
             self.delivery_notice.setText(
                 "Delivery retries automatically. Follow progress in Activity.")
             self.delivery_notice.show()
-            self.response_message_field.setEnabled(False)
             self.admit_button.setText("Sending acknowledgment...")
             record = self.vault.db.outbox.get((self._pending_said,))
             if record.status == 'submitted':
@@ -405,7 +383,17 @@ class AcceptGrantDialog(LocksmithDialog):
             return
         if doer_name != "Ipex" or data.get('said') != self._pending_said:
             return
-        if event_type not in ("transport_submitted", "send_failed"):
+        if self.save and event_type == 'accepted':
+            self._disconnect()
+            stream = exchanging.serializeMessage(self.vault.hby, self._pending_said)
+            self._save_admit_to_file(self._pending_said, stream)
+            return
+        if event_type == 'awaiting_witnesses':
+            self.delivery_notice.setText('Waiting for witness receipts before accepting.')
+            self.delivery_notice.show()
+            self.admit_button.setText('Waiting for witnesses...')
+            return
+        if event_type not in ("transport_submitted", "send_failed", "preparation_failed"):
             return
         if event_type == "transport_submitted":
             self._disconnect()
@@ -414,12 +402,15 @@ class AcceptGrantDialog(LocksmithDialog):
             self.show_success("Credential accepted. Acknowledgment submitted for delivery.")
             QTimer.singleShot(2000, self.accept)
         else:
-            self.show_error(f"Credential accepted, but acknowledgment delivery failed: {data.get('error', 'Unknown error')}")
+            receipt = self.vault.db.receipts.get((self.recipient, self.grant_said))
+            outcome = ('Credential accepted, but acknowledgment delivery failed'
+                       if receipt.status == 'accepted' else 'Acceptance preparation failed')
+            self.show_error(f"{outcome}: {data.get('error', 'Unknown error')}")
             self._reset_button()
             record = self.vault.db.outbox.get((self._pending_said,))
-            if record.status == 'blocked':
-                self.admit_button.setEnabled(False)
-                self.delivery_notice.setText("Delivery stopped. See Credentials → Activity for details.")
+            if record is not None and record.status == 'blocked':
+                self.admit_button.setEnabled(True)
+                self.delivery_notice.setText("Check delivery details in Credentials → Activity.")
 
     def _save_admit_to_file(self, admit_said: str, admit_message: bytes):
         """
@@ -454,15 +445,20 @@ class AcceptGrantDialog(LocksmithDialog):
 
             except Exception as e:
                 logger.exception(f"Failed to save admit message: {e}")
-                self.show_error(f"Failed to save file: {str(e)}")
+                self.show_error(f"Credential added, but receipt export failed: {str(e)}")
                 self._reset_button()
         else:
             # User cancelled save dialog
+            self.delivery_notice.setText('Credential added; receipt not exported. You can export it later.')
+            self.delivery_notice.show()
             self._reset_button()
 
     def _reset_button(self):
         """Reset admit button to enabled state."""
         self.admit_button.setEnabled(True)
         self.decline_button.setEnabled(self._can_decline())
-        self.admit_button.setText("Retry sending" if self._pending_said else
+        receipt = self.vault.db.receipts.get((self.recipient, self.grant_said))
+        self.admit_button.setText("Export receipt" if self.save and receipt and receipt.status == 'accepted' else
+                                 "Retry acceptance" if self.save and self._pending_said else
+                                 "Retry sending" if self._pending_said else
                                  "Add and export receipt" if self.save else "Add credential")

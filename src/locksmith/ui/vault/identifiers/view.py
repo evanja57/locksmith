@@ -5,18 +5,21 @@ locksmith.ui.vault.identifiers.view module
 Dialog for viewing identifier details
 """
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout
 )
 from keri import help
 
 from locksmith.core import habbing
+from locksmith.core.indirecting import receiving_endpoints
 from locksmith.ui import colors
 from locksmith.ui.toolkit.widgets import (
     LocksmithDialog,
     LocksmithInvertedButton
 )
 from locksmith.ui.vault.identifiers.identifier_sections import IdentifierViewSectionsMixin
+from locksmith.ui.vault.shared.export import export_identifier_to_cesr
 
 logger = help.ogler.getLogger(__name__)
 
@@ -35,6 +38,7 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
             parent: Parent widget (typically VaultPage)
         """
         self.app = app
+        self.vault = app.vault
         self.identifier_alias = identifier_alias
 
         # Get the hab (identifier)
@@ -58,6 +62,11 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
 
         # AID Section
         self._build_aid_section(layout)
+        self.receiving_status = QLabel()
+        self.receiving_status.setWordWrap(True)
+        layout.addWidget(self.receiving_status)
+        self.share_button = LocksmithInvertedButton('Share introduction')
+        layout.addWidget(self.share_button)
 
         # Key Event Log Section
         self._build_kel_section(layout)
@@ -112,8 +121,32 @@ class ViewIdentifierDialog(IdentifierViewSectionsMixin, LocksmithDialog):
 
         # Connect buttons
         self.close_button.clicked.connect(self.close)
+        self.share_button.clicked.connect(self._share_introduction)
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._refresh_receiving)
+        self.status_timer.start(1000)
+        self.finished.connect(self.status_timer.stop)
+        self._refresh_receiving()
 
         # Connect to vault signal bridge if available
         if self.app and hasattr(self.app, 'vault') and self.app.vault and hasattr(self.app.vault, 'signals'):
             self.app.vault.signals.doer_event.connect(self._on_doer_event)
             logger.info("ViewIdentifierDialog: Connected to vault signal bridge")
+
+    def _refresh_receiving(self):
+        if self.app.vault is not self.vault or getattr(self.vault, 'closed', False):
+            self.status_timer.stop()
+            self.receiving_status.setText('Vault closed')
+            self.share_button.setEnabled(False)
+            return
+        endpoints = receiving_endpoints(self.hab)
+        pollers = [poller for poller in self.vault.mbx.pollers if poller.pre == self.hab.pre]
+        errors = [poller.error for poller in pollers if poller.error]
+        text = ('Receiving is not configured' if not endpoints else
+                'Receiving needs attention: ' + errors[0] if errors else
+                f'Receiving through {len(endpoints)} configured mailbox endpoints')
+        self.receiving_status.setText(text)
+
+    def _share_introduction(self):
+        if self.app.vault is self.vault and not getattr(self.vault, 'closed', False):
+            export_identifier_to_cesr(self, self.app, self.identifier_alias)

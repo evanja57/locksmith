@@ -15,6 +15,7 @@ from locksmith.core import credentialing
 from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name, date_label, status_label
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
 from locksmith.ui.toolkit.widgets import LocksmithInvertedButton
+from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
 from locksmith.ui.vault.credentials.received.accept import AcceptCredentialDialog
 from locksmith.ui.vault.credentials.received.delete import DeleteReceivedCredentialDialog
@@ -76,8 +77,9 @@ class ReceivedCredentialsListPage(BaseListPage):
             row_actions=["View", "Offer", "View exchange history", "Delete"],
             row_action_icons={
                 "View": ":/assets/material-icons/view.svg",
-                "Delete": ":/assets/material-icons/delete.svg",
-                "Export": ":/assets/material-icons/export.svg"
+                "Offer": ":/assets/material-icons/share.svg",
+                "View exchange history": ":/assets/material-icons/swap_horiz.svg",
+                "Delete": ":/assets/material-icons/delete.svg"
             }
         )
 
@@ -94,10 +96,16 @@ class ReceivedCredentialsListPage(BaseListPage):
         import_button = LocksmithInvertedButton('Import Grant…')
         import_button.clicked.connect(self._on_accept_credential)
         self.table.header.add_action_button(import_button)
+        self.inventory = FloatingLabelComboBox('Show')
+        self.inventory.addItem('Held credentials', True)
+        self.inventory.addItem('Verified presentations', False)
+        self.inventory.currentIndexChanged.connect(
+            lambda *_: self._load_received_credentials_data(reset_page=True))
+        self.table.header.add_action_button(self.inventory)
 
         logger.info("ReceivedCredentialsListPage initialized with table widget")
 
-    def _load_received_credentials_data(self):
+    def _load_received_credentials_data(self, *, reset_page=False):
         """
         Load received credentials data from the opened vault.
 
@@ -108,6 +116,8 @@ class ReceivedCredentialsListPage(BaseListPage):
             creds = credentialing.credentials(self.app.vault, received=True)
 
             for credential in creds:
+                if credential['held'] != self.inventory.currentData():
+                    continue
                 sad = credential['sad']
                 schemer = credential.get("schema") or {}
                 status = credential.get("status", {})
@@ -119,11 +129,13 @@ class ReceivedCredentialsListPage(BaseListPage):
                     "From": recipient_name,
                     "Status": status_text,
                     "Accepted": date_label(credential['accepted_at']),
-                    "SAID": sad['d']  # Store SAID for view operation
+                    "SAID": sad['d'],
+                    "_actions": (["View", "Offer", "View exchange history", "Delete"]
+                                 if credential['held'] else ["View", "View exchange history", "Delete"]),
                 }
                 received_credentials_data.append(cred_dict)
 
-            self.table.set_static_data(received_credentials_data)
+            self.table.set_static_data(received_credentials_data, reset_page=reset_page)
             logger.info(f"Loaded {len(received_credentials_data)} received credentials")
         except Exception as e:
             logger.exception(f"Error loading received credentials data: {e}")
@@ -145,7 +157,7 @@ class ReceivedCredentialsListPage(BaseListPage):
         if action == "View exchange history":
             self.parent.show_credential_activity(credential_said, received=True)
         elif action == "Offer":
-            self.parent.start_credential_exchange('Offer', credential_said=credential_said)
+            self.parent.start_credential_exchange('Offer', credential_said=credential_said, received=True)
         elif action == "View":
             dialog = ViewIssuedCredentialDialog(icon_path=self.icon_path, app=self.app,
                                                 credential_said=credential_said,
@@ -181,7 +193,7 @@ class ReceivedCredentialsListPage(BaseListPage):
 
         # Now that the vault is open and hby is available, load the data
         if self.app.vault and self.app.vault.hby:
-            self._load_received_credentials_data()
+            self._load_received_credentials_data(reset_page=True)
 
             # Connect to vault signal bridge for automatic list updates
             if hasattr(self.app.vault, 'signals'):
@@ -200,6 +212,9 @@ class ReceivedCredentialsListPage(BaseListPage):
             data: Event data dictionary
         """
         logger.debug(f"ReceivedCredentialsListPage received doer_event: {doer_name} - {event_type}")
+
+        if doer_name == 'RegistryEvidence' and event_type == 'status_checked':
+            self._load_received_credentials_data()
 
         # Refresh list when a credential is received
         if doer_name == "ReceiveCredentialDoer" and event_type == "credential_received":

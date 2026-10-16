@@ -18,9 +18,9 @@ from hio.base import doing
 from keri import help, kering
 from keri.app import organizing, forwarding
 from keri.app.habbing import GroupHab
-from keri.core import exchange, parsing, serdering
+from keri.core import eventing, exchange, parsing, serdering
 from keri.core.serdering import SerderKERI
-from keri.db import basing
+from keri.db import basing, fetchTsgs
 from keri.help import helping
 from mnemonic import Mnemonic
 
@@ -50,8 +50,16 @@ def identifier_introduction(hab) -> bytes:
         if eid != hab.pre and eid in hab.kevers:
             stream.extend(hab.replay(pre=eid, gvrsn=version))
         stream.extend(hab.loadLocScheme(eid=eid, gvrsn=version))
-    for role, eid in roles:
-        stream.extend(hab.loadEndRole(cid=hab.pre, role=role, eid=eid, gvrsn=version))
+    # loadEndRole omits revoked roles. Export each latest accepted reply,
+    # including cuts, with its retained signatures so imports remove old routes.
+    for _, said in hab.db.eans.getTopItemIter(keys=(hab.pre,)):
+        serder = hab.db.rpys.get(keys=(said.qb64,))
+        cigars = []
+        for verfer, cigar in hab.db.scgs.get(keys=(said.qb64,)):
+            cigar.verfer = verfer
+            cigars.append(cigar)
+        tsgs = fetchTsgs(db=hab.db.tsgs, diger=said)
+        stream.extend(eventing.messagize(serder=serder, cigars=cigars, tsgs=tsgs, gvrsn=version))
     return bytes(stream)
 
 

@@ -1,0 +1,327 @@
+{
+  "$id": "EGcqmkrnaQz8F1PEekLOaySiW-uDaJ0SfoqtSuqCvEif",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SEDI Bespoke Presentation Schema",
+  "description": "SEDI Bespoke Presentation JSON Schema for acm ACDC.",
+  "credentialType": "SEDI_Bespoke_ACDC_acm_message",
+  "version": "0.1.0",
+  "type": "object",
+  "required": [
+    "v",
+    "d",
+    "i",
+    "s",
+    "a",
+    "e",
+    "r"
+  ],
+  "properties": {
+    "v": {
+      "description": "ACDC version string",
+      "type": "string"
+    },
+    "t": {
+      "description": "Message type",
+      "type": "string"
+    },
+    "d": {
+      "description": "Message SAID",
+      "type": "string"
+    },
+    "u": {
+      "description": "Message UE",
+      "type": "string"
+    },
+    "i": {
+      "description": "Issuer AID",
+      "type": "string"
+    },
+    "rd": {
+      "description": "Registry SAID",
+      "type": "string"
+    },
+    "s": {
+      "description": "Schema Section",
+      "oneOf": [
+        {
+          "description": "Schema Section SAID",
+          "type": "string"
+        },
+        {
+          "description": "Schema Section Detail",
+          "type": "object"
+        }
+      ]
+    },
+    "a": {
+      "description": "Attribute Section",
+      "oneOf": [
+        {
+          "description": "Attribute Section SAID",
+          "type": "string"
+        },
+        {
+          "description": "Attribute Section Detail",
+          "type": "object",
+          "required": [
+            "d",
+            "u",
+            "i"
+          ],
+          "properties": {
+            "d": {
+              "description": "Attribute Section SAID",
+              "type": "string"
+            },
+            "u": {
+              "description": "Attribute Section UE",
+              "type": "string"
+            },
+            "i": {
+              "description": "Issuee AID",
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "e": {
+      "description": "Edge Section",
+      "oneOf": [
+        {
+          "description": "Edge Section SAID",
+          "type": "string"
+        },
+        {
+          "description": "Edge Section Detail",
+          "type": "object",
+          "required": [
+            "d",
+            "u"
+          ],
+          "properties": {
+            "d": {
+              "description": "Edge Section SAID",
+              "type": "string"
+            },
+            "u": {
+              "description": "Edge Section UE",
+              "type": "string"
+            },
+            "core": {
+              "description": "Core Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "residence": {
+              "description": "Residence Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "age": {
+              "description": "Age Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "image": {
+              "description": "High Resolution Image Proof Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "guardian": {
+              "description": "Guardian Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "social": {
+              "description": "Social Edge Block",
+              "type": "object",
+              "required": [
+                "n"
+              ],
+              "properties": {
+                "d": {
+                  "description": "Edge SAID",
+                  "type": "string"
+                },
+                "u": {
+                  "description": "Edge UE",
+                  "type": "string"
+                },
+                "n": {
+                  "description": "Far Node SAID",
+                  "type": "string"
+                },
+                "s": {
+                  "description": "Far Node Schema SAID",
+                  "type": "string"
+                },
+                "o": {
+                  "description": "Edge Unary Operator",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "r": {
+      "description": "Rule Section",
+      "oneOf": [
+        {
+          "description": "Rule Section SAID",
+          "type": "string"
+        },
+        {
+          "description": "Rule Section Detail",
+          "type": "object",
+          "required": [
+            "d",
+            "l"
+          ],
+          "properties": {
+            "d": {
+              "description": "Rule Section SAID",
+              "type": "string"
+            },
+            "l": {
+              "description": "Legal Language",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

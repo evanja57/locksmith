@@ -1,27 +1,35 @@
 """Credential exchanges, decisions, and retained delivery state for one vault."""
 import json
+from datetime import datetime
 from collections.abc import Mapping
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QScrollArea, QStackedWidget, QTabBar, QTextEdit, QToolButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QScrollArea, QStackedWidget, QTabBar, QTextEdit,
+    QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from keri.help import helping
+from keri import kering
+from keri.core import SerderACDC
 from keri.peer import exchanging
 
 from locksmith.core import credentialing, ipexing
 from locksmith.ui import colors
 from locksmith.ui.toolkit.tables import PaginatedTableWidget
+from locksmith.ui.toolkit.tables.components import SkewersMenuButton
 from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithDialog, LocksmithInvertedButton
 from locksmith.ui.toolkit.widgets.collapsible import CollapsibleSection
-from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox, LocksmithPlainTextEdit
+from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
 from locksmith.ui.vault.credentials.received.accept_grant import AcceptGrantDialog
 from locksmith.ui.vault.credentials.issued.issue import IssueCredentialDialog
 from locksmith.ui.vault.credentials.issued.view import ViewIssuedCredentialDialog
-from locksmith.ui.vault.credentials.presentation import attribute_view, credential_name, identifier_name
+from locksmith.ui.vault.credentials.presentation import (
+    attribute_view, credential_name, identifier_name, rules_text,
+    credential_details, disclosed_credentials,
+)
 from locksmith.ui.vault.shared.base_list_page import BaseListPage
+from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 
 
 def action_dot(parent=None):
@@ -39,18 +47,35 @@ class ActivityTable(PaginatedTableWidget):
         self.table.hide()
 
     def _create_empty_state(self):
-        label = QLabel('No exchanges in progress.')
+        label = QLabel('No credential exchanges yet.')
         label.setStyleSheet(f'color: {colors.TEXT_SECONDARY}; padding: 12px 0;')
         label.setFixedHeight(48)
         return label
 
     def _display_data(self, data):
         super()._display_data(data)
+        action_column = self.columns.index('Actions')
+        self.table.horizontalHeader().setSectionResizeMode(action_column, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(action_column, 260 if any(row['_actions'] for row in data) else 70)
         for index, row in enumerate(data):
             status = self.table.item(index, self.columns.index('Status'))
             outcome = ('Accepted' if row['Status'] == 'Admit' else 'Declined') if row['_finished'] else row['_outcome']
-            status.setText(row['Status'] + '\n' + outcome)
+            status.setText('Expired\n' + outcome if row.get('expired') else outcome)
             status.setToolTip(row['_outcome'])
+            if row['_actions']:
+                actions, icons = self.row_actions_callback(row)
+                cell = QWidget()
+                layout = QHBoxLayout(cell)
+                layout.setContentsMargins(8, 0, 8, 0)
+                button = LocksmithInvertedButton(row['_review'])
+                button.clicked.connect(lambda checked=False, r=row: self.row_action_triggered.emit(r, 'Review'))
+                layout.addWidget(button)
+                menu = SkewersMenuButton(actions=actions, action_icons=icons)
+                menu.action_triggered.connect(lambda action, r=row: self.row_action_triggered.emit(r, action))
+                layout.addWidget(menu)
+                self.table.setCellWidget(index, action_column, cell)
+            if row['_finished']:
+                status.setForeground(QColor(colors.SUCCESS_TEXT if row['Status'] == 'Admit' else colors.TEXT_SECONDARY))
             if not row['_attention']:
                 continue
             item = self.table.item(index, 0)
@@ -82,7 +107,7 @@ class ActivityTabs(QTabBar):
         self.dots = []
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(40)
-        for title in ('Issued', 'Received'):
+        for title in ('Outgoing', 'Incoming'):
             index = self.addTab(title)
             slot = QWidget()
             slot.setFixedSize(16, 16)
@@ -104,7 +129,6 @@ class CredentialActivityPage(BaseListPage):
         self._response_dialog = None
         self._rows = []
         self._credential_filter = None
-        self._completed = [None, None]
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Window, QColor(colors.BACKGROUND_CONTENT))
         self.setPalette(palette)
@@ -114,8 +138,9 @@ class CredentialActivityPage(BaseListPage):
         self.stack = QStackedWidget()
         layout.addWidget(self.stack)
         self.tables, self.tabs, self.dots = [], [], []
-        self.history_tables, self.history_buttons = [], []
-        self.scope_labels, self.clear_buttons, self.completion_labels = [], [], []
+        self.history_tables, self.history_headings, self.active_headings = [], [], []
+        self._history_expanded = [None, None]
+        self.scope_labels, self.clear_buttons = [], []
         for direction, counterparty in enumerate(('To', 'From')):
             table = ActivityTable(
                 columns=['Credential', counterparty, 'Status', 'Updated', 'Actions'],
@@ -146,34 +171,24 @@ class CredentialActivityPage(BaseListPage):
             scope.addStretch()
             scope.addWidget(clear)
             table.layout().insertLayout(2, scope)
-            notice = QLabel()
-            notice.setStyleSheet(f'padding-top: 12px; color: {colors.TEXT_SECONDARY};')
-            notice.setWordWrap(True)
-            notice.setTextFormat(Qt.TextFormat.RichText)
-            notice.linkActivated.connect(lambda target, i=direction: self._open_completion(i, target))
-            table.layout().insertWidget(3, notice)
             heading = QLabel('In progress')
             heading.setStyleSheet('font-weight: bold; padding: 24px 0 8px;')
-            table.layout().insertWidget(4, heading)
+            table.layout().insertWidget(3, heading)
             history = ActivityTable(columns=table.columns, column_widths=table.column_widths,
                 title='Exchange history', items_per_page=10, show_add_button=False,
                 row_actions=['View'], row_actions_callback=self._get_row_actions, parent=self)
             history.header.hide()
             history.layout().setContentsMargins(0, 0, 0, 0)
-            history.empty_state.setText('No exchange history.')
-            history.hide()
-            toggle = QToolButton()
-            toggle.setText('History (0)')
-            toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            toggle.setArrowType(Qt.ArrowType.RightArrow)
-            toggle.setCheckable(True)
-            toggle.setStyleSheet(f'''QToolButton {{ border: none; background: transparent;
-                padding: 12px 0; font-size: 14px; font-weight: bold; color: {colors.TEXT_PRIMARY}; }}
-                QToolButton:hover {{ color: {colors.PRIMARY}; }}''')
-            toggle.toggled.connect(lambda expanded, i=direction: self._toggle_history(i, expanded))
-            table.layout().insertWidget(table.layout().count() - 1, toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+            history_heading = QToolButton()
+            history_heading.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            history_heading.setCheckable(True)
+            history_heading.setStyleSheet(f'''QToolButton {{ font-weight: bold; padding: 16px 0 8px;
+                border: none; background: transparent; color: {colors.TEXT_PRIMARY}; }}''')
+            history_heading.toggled.connect(lambda expanded, i=direction: self._toggle_history(i, expanded))
+            table.layout().insertWidget(table.layout().count() - 1, history_heading)
             table.layout().insertWidget(table.layout().count() - 1, history)
             table.search_changed.connect(history._on_search_changed)
+            table.search_changed.connect(lambda _, i=direction: self._update_sections(i))
             for view in (table, history):
                 view.table.verticalHeader().setDefaultSectionSize(66)
                 view.row_clicked.connect(self._on_row_clicked)
@@ -189,10 +204,10 @@ class CredentialActivityPage(BaseListPage):
             self.stack.addWidget(scroll)
             self.tables.append(table)
             self.history_tables.append(history)
-            self.history_buttons.append(toggle)
+            self.history_headings.append(history_heading)
+            self.active_headings.append(heading)
             self.scope_labels.append(scope_label)
             self.clear_buttons.append(clear)
-            self.completion_labels.append(notice)
             self.tabs.append(tabs)
             self.dots.append(tabs.dots)
 
@@ -251,23 +266,33 @@ class CredentialActivityPage(BaseListPage):
             tabs.setCurrentIndex(index)
             tabs.blockSignals(False)
 
-    def _toggle_history(self, index, expanded):
-        self.history_tables[index].setVisible(expanded)
-        self.history_buttons[index].setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-
     def _clear_credential_filter(self):
         self._credential_filter = None
         self.refresh()
 
-    def _open_completion(self, index, target):
-        self._selected = self._completed[index]
-        if target == 'credential':
-            self._view_credential()
-        else:
-            self.history_buttons[index].setChecked(True)
-            row = next((row for row in self._rows if row['_key'] == self._selected), None)
-            if row:
-                self._on_row_action(row, 'View')
+    def _update_sections(self, index):
+        table, history = self.tables[index], self.history_tables[index]
+        self.active_headings[index].setText(f'In progress ({table.total_items})')
+        self.active_headings[index].setVisible(bool(table.total_items))
+        heading = self.history_headings[index]
+        expanded = self._history_expanded[index]
+        if expanded is None:
+            expanded = not table.total_items or bool(table.current_search or self._credential_filter)
+        heading.setText(f'History ({history.total_items})')
+        heading.setVisible(bool(history.total_items))
+        heading.blockSignals(True)
+        heading.setChecked(expanded)
+        heading.blockSignals(False)
+        heading.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        history.setVisible(bool(history.total_items) and expanded)
+        table.empty_state.setText('No matching exchanges.' if table.current_search else
+                                  'No exchanges for this credential.' if self._credential_filter else
+                                  'No credential exchanges yet.')
+        table.empty_state.setVisible(not table.total_items and not history.total_items)
+
+    def _toggle_history(self, index, expanded):
+        self._history_expanded[index] = expanded
+        self._update_sections(index)
 
     def _view_credential(self):
         row = next((row for row in self._rows if row['_key'] == self._selected), None)
@@ -290,11 +315,7 @@ class CredentialActivityPage(BaseListPage):
         self._selected = None
         self._credential_filter = None
         self._rows = []
-        self._completed = [None, None]
-        for button in self.history_buttons:
-            button.setChecked(False)
-        for label in self.completion_labels:
-            label.clear()
+        self._history_expanded = [None, None]
         for table in self.tables + self.history_tables:
             table.current_page = 1
         if self.vault is not None:
@@ -340,7 +361,6 @@ class CredentialActivityPage(BaseListPage):
         return 'Credential request', None
 
     def refresh(self, *_):
-        active_keys = {row['_key'] for row in self._rows if not row['_finished']}
         rows = [[], []]
         if self._current_vault():
             for exchange in ipexing.exchanges(self.vault):
@@ -369,8 +389,9 @@ class CredentialActivityPage(BaseListPage):
                                     and (tip.pre != pre or submission and submission.status == 'submitted'))
                     origins = {said for exn in chain for said in exn.sad['a'].get('o', [])}
                     # A holder can send a credential from Received inventory.
+                    received_first = bool(index) or (credential is not None and credential['i'] != pre)
                     inventory_said, inventory_received = next(
-                        ((said, received) for received in (bool(index), not bool(index)) for said in origins
+                        ((said, received) for received in (received_first, not received_first) for said in origins
                          if (self.vault.db.accepted if received else self.vault.db.issued).get((said,))),
                         (None, False))
                     row = dict(exchange, Credential=title, To=self._name(exchange['recipient']),
@@ -381,27 +402,25 @@ class CredentialActivityPage(BaseListPage):
                                _interrupted=interrupted, _finished=finished, _origins=origins,
                                _inventory_said=inventory_said, _inventory_received=inventory_received,
                                _updated=sort_date)
+                    row['_review'] = ('Resume acceptance' if interrupted else
+                                      {'Apply': 'Review application', 'Offer': 'Review offer',
+                                       'Agree': 'Send credential', 'Grant': 'Review credential'}.get(row['Status'], 'Review'))
                     row['_outcome'] = self._outcome(row)
+                    if exchange.get('expired'):
+                        row['Status'] = 'Expired'
                     rows[index].append(row)
         self._rows = rows[0] + rows[1]
         for index, table in enumerate(self.tables):
             ordered = sorted(rows[index], key=lambda row: row['_updated'], reverse=True)
             visible = [row for row in ordered if not self._credential_filter or self._credential_filter in row['_origins']]
             history = [row for row in visible if row['_finished']]
-            table.set_static_data([row for row in visible if not row['_finished']], reset_page=False)
+            active = [row for row in visible if not row['_finished']]
+            table.set_static_data(active, reset_page=False)
             self.history_tables[index].set_static_data(history, reset_page=False)
-            self.history_buttons[index].setText(f'History ({len(history)})')
+            self._update_sections(index)
             self.scope_labels[index].setText('Exchanges for this credential' if self._credential_filter else '')
             self.scope_labels[index].setVisible(bool(self._credential_filter))
             self.clear_buttons[index].setVisible(bool(self._credential_filter))
-            newly_finished = next((row for row in history if row['_key'] in active_keys), None)
-            if newly_finished:
-                self._completed[index] = newly_finished['_key']
-                text = 'Exchange complete. <a href="history">View history</a>'
-                if newly_finished['_inventory_said']:
-                    text += ' · <a href="credential">View credential</a>'
-                self.completion_labels[index].setText(text)
-            self.completion_labels[index].setVisible(any(row['_key'] == self._completed[index] for row in history))
         attention = [any(row['_attention'] for row in direction) for direction in rows]
         for dots in self.dots:
             for index, dot in enumerate(dots):
@@ -410,16 +429,24 @@ class CredentialActivityPage(BaseListPage):
         self._show_details(next((row for row in self._rows if row['_key'] == self._selected), None))
 
     def _outcome(self, row):
+        if row.get('expired'):
+            return 'Start a new application or offer.'
         if not row['messages']:
             return row['problem']
         tip = row['messages'][-1]
         local = tip.pre == row['sender' if row['_key'][1] == 0 else 'recipient']
         record = row['submissions'].get(tip.said)
         if row['_interrupted']:
+            if any(receipt.status == 'preparing' for _, receipt in row['receipts']):
+                return 'Waiting for witness receipts before accepting.'
             return 'Acceptance needs to be resumed.'
         if record and local and record.status != 'submitted':
             label = {'pending': 'Queued', 'sending': 'Sending', 'failed': 'Send failed',
-                     'blocked': 'Sending stopped'}.get(record.status, record.status)
+                     'blocked': 'Sending blocked'}.get(record.status, record.status)
+            if record.status == 'blocked' and record.missing_route:
+                label = 'Delivery details needed'
+            if record.status == 'failed' and record.attempts <= len(ipexing.SendIpexDoer.RetryDelays):
+                label = 'Retrying at ' + datetime.fromtimestamp(record.retry_at).strftime('%H:%M:%S')
             return ('Accepted; acknowledgment: ' if tip.route == '/ipex/admit' else '') + label
         if tip.route == '/ipex/admit':
             if not local:
@@ -427,13 +454,18 @@ class CredentialActivityPage(BaseListPage):
             return ('Accepted; acknowledgment submitted.' if record else
                     'Accepted; acknowledgment saved. Choose Send acknowledgment to notify the sender.')
         if tip.route == '/ipex/spurn':
-            return 'Exchange declined.'
+            return 'Declined by you.' if local else f'Declined by {self._name(tip.pre)}.'
         if local and not record:
             return 'Saved locally. Sending has not been authorized.'
         return 'Awaiting your decision.' if row['_actions'] else f'Waiting for {self._name(tip.sad["ri"])}.'
 
     def _get_row_actions(self, row):
-        return ['View'], {'View': ':/assets/material-icons/view.svg'}
+        action = 'Review' if row['_actions'] else 'View exchange'
+        actions = [action]
+        if row['_inventory_said']:
+            actions.append('View credential')
+        return actions, {action: ':/assets/material-icons/view.svg',
+                         'View credential': ':/assets/material-icons/in-badge.svg'}
 
     def _show_details(self, row):
         self._selected = row['_key'] if row else None
@@ -444,13 +476,11 @@ class CredentialActivityPage(BaseListPage):
         self.messages.clear()
         if row:
             peer = f"To {row['To']}" if row['_key'][1] == 0 else f"From {row['From']}"
-            self.summary.setText(f"{row['Credential']}\n{peer}\n{self._outcome(row)}")
-            if row['problem']:
-                self.summary.setText(self.summary.text() + '\n' + row['problem'])
+            self.summary.setText(f"{row['Credential']}\n{peer}\n{row['problem'] or self._outcome(row)}")
             lines = [row['Credential'], f"From: {row['From']}\nTo: {row['To']}", row['problem']]
             for exn in row['messages']:
                 record = row['submissions'].get(exn.said)
-                local = exn.pre in self.vault.hby.prefixes
+                local = exn.pre == row['sender' if row['_key'][1] == 0 else 'recipient']
                 delivery = record.status if record else ('Saved locally' if local else 'Received')
                 stage = exn.route.rsplit('/', 1)[-1].title()
                 lines.append(f"{stage} · {self._name(exn.pre)} · {delivery}\n{exn.sad['a'].get('m', '')}\n"
@@ -459,7 +489,8 @@ class CredentialActivityPage(BaseListPage):
                     lines.append(f'Attempts: {record.attempts}\nError: {record.error or "None"}')
                     if exn is row['messages'][-1] and record.status == 'blocked':
                         self.summary.setText(self.summary.text() + '\nSending stopped: ' + record.error)
-                if local and exn is row['messages'][-1] and (record is None or record.status in ('pending', 'failed')):
+                if (local and not row.get('expired') and exn is row['messages'][-1]
+                        and (record is None or record.status in ('pending', 'failed', 'blocked'))):
                     self.messages.addItem(f'{stage} · {delivery}', exn.said)
             if not row['messages']:
                 for said, record in row['submissions'].items():
@@ -476,6 +507,11 @@ class CredentialActivityPage(BaseListPage):
                 button = LocksmithButton(action)
                 button.clicked.connect(lambda checked=False, r=row, a=action: self._on_row_action(r, a))
                 self.response_buttons.addWidget(button)
+            if any(record.status == 'blocked' and record.missing_route
+                   for record in row['submissions'].values()):
+                repair = LocksmithInvertedButton('Import delivery details')
+                repair.clicked.connect(self._repair_route)
+                self.response_buttons.addWidget(repair)
             self.details.setPlainText('\n\n'.join(line for line in lines if line))
         else:
             self.summary.setText('Select an exchange to see its details.')
@@ -489,6 +525,18 @@ class CredentialActivityPage(BaseListPage):
         self.view_credential_button.setVisible(bool(row and row['_inventory_said']))
         self._update_retry()
 
+    def _repair_route(self):
+        self._repair_dialog = AddRemoteIdentifierDialog(self.app, self)
+        self._repair_dialog.finished.connect(lambda _, vault=self.vault: self._return_from_repair(vault))
+        self._detail_dialog.hide()
+        self._repair_dialog.open()
+
+    def _return_from_repair(self, vault):
+        if self._current_vault() and self.vault is vault:
+            self.refresh()
+            self._detail_dialog.open()
+            self._detail_dialog.fit_content(580)
+
     def _update_retry(self):
         said = self.messages.currentData()
         record = self.vault.db.outbox.get((said,)) if said and self._current_vault() else None
@@ -499,7 +547,7 @@ class CredentialActivityPage(BaseListPage):
                          for row in self._rows if row['_key'] == self._selected
                          for _, receipt in row['receipts'])
         self.retry_button.setEnabled(bool(said and self._current_vault() and not incomplete
-                                          and (record is None or record.status in ('pending', 'failed'))))
+                                          and (record is None or record.status in ('pending', 'failed', 'blocked'))))
 
     def _retry_selected(self):
         said = self.messages.currentData()
@@ -507,14 +555,15 @@ class CredentialActivityPage(BaseListPage):
             return
         try:
             record = self.vault.db.outbox.get((said,))
-            if record and record.status in ('pending', 'failed'):
+            if record and record.status in ('pending', 'failed', 'blocked'):
                 ipexing.retry(self.vault, said)
             elif record is None:
                 exn = self.vault.hby.db.exns.get((said,))
                 hab = self.vault.hby.habByPre(exn.pre)
                 if exn.route == '/ipex/admit':
                     ipexing.admit(self.vault, hab, exn.sad['p'], send=True)
-                    self.vault.signals.emit_doer_event('Ipex', 'accepted', {'said': said})
+                    if self.vault.db.receipts.get((hab.pre, exn.sad['p'])).status == 'accepted':
+                        self.vault.signals.emit_doer_event('Ipex', 'accepted', {'said': said})
                 else:
                     stream = exchanging.serializeMessage(self.vault.hby, said)
                     ipexing.submit(self.vault, hab, exn, stream[exn.size:])
@@ -539,9 +588,14 @@ class CredentialActivityPage(BaseListPage):
             notifier.mar(rid)
         if unread:
             self.vault.signals.emit_doer_event('MailboxListener', 'mark_as_read', {})
-        if action == 'View':
+        if action == 'View credential':
+            self._view_credential()
+            return
+        default_response = action in ('View', 'View exchange', 'Review') and row['Status'] == 'Apply'
+        if action in ('View', 'View exchange', 'Review'):
             if not row['_actions']:
                 self._detail_dialog.open()
+                self._detail_dialog.fit_content(580)
                 return
             action = row['_actions'][0]
         if action not in row['_actions']:
@@ -551,26 +605,27 @@ class CredentialActivityPage(BaseListPage):
             said = row['_interrupted'][0][0][1] if row['_interrupted'] else row['messages'][-1].said
             self._response_dialog = AcceptGrantDialog(self.app, self, said, save=False)
         else:
-            self._response_dialog = ExchangeResponseDialog(self, row, action)
+            self._response_dialog = ExchangeResponseDialog(self, row, None if default_response else action)
         self._response_dialog.finished.connect(self.refresh)
         self._response_dialog.open()
 
-    def show_exchange(self, said, *, received=None):
+    def show_exchange(self, said, *, received=None, open_dialog=True):
         self._credential_filter = None
         self.refresh()
         if self._current_vault() and (self.vault.db.issued.get((said,)) or self.vault.db.accepted.get((said,))):
             self._credential_filter = said
             self._set_direction(int(received) if received is not None else
                                 0 if self.vault.db.issued.get((said,)) else 1)
+            self._history_expanded[self.stack.currentIndex()] = True
             self.refresh()
-            self.history_buttons[self.stack.currentIndex()].setChecked(True)
             return
         for row in self._rows:
+            if received is not None and row['_key'][1] != int(received):
+                continue
             if said == row['root'] or any(exn.said == said or said in exn.sad['a'].get('o', []) for exn in row['messages']):
                 self._set_direction(row['_key'][1])
-                if row['_finished']:
-                    self.history_buttons[row['_key'][1]].setChecked(True)
-                self._on_row_action(row, 'View')
+                if open_dialog:
+                    self._on_row_action(row, 'View')
                 return
 
 
@@ -578,13 +633,15 @@ class ExchangeResponseDialog(LocksmithDialog):
     """Review the current exchange and choose its next response."""
 
     Labels = {'Offer': 'Send offer', 'Grant': 'Send credential',
-              'Agree': 'Request credential', 'Spurn': 'Decline'}
-    Help = {'Offer': 'Only a reference is shared. Details are sent later.',
-            'Grant': 'This shares the whole credential with the recipient.',
-            'Agree': 'Credential details have not been disclosed yet.',
+              'Agree': 'Agree and request', 'Spurn': 'Decline'}
+    Help = {'Offer': 'Sends the issuer, credential type, and terms now. Credential values are sent after agreement.',
+            'Grant': 'Sends the credential values now. The recipient can review them before adding the credential.',
+            'Agree': 'Credential values are not shared yet. Agree to request them, then review them before adding the credential.',
             'Spurn': 'This ends the exchange.'}
 
     def __init__(self, page, row, action):
+        self._default_response = action is None
+        action = action or row['_actions'][0]
         self.page, self.vault, self.row, self.action = page, page.vault, row, action
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -601,11 +658,6 @@ class ExchangeResponseDialog(LocksmithDialog):
         peer.setTextFormat(Qt.TextFormat.PlainText)
         peer.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
         layout.addWidget(peer)
-        if tip.sad['a'].get('m'):
-            message = QLabel(f"Message from {page._name(tip.pre)}: {tip.sad['a']['m']}")
-            message.setTextFormat(Qt.TextFormat.PlainText)
-            message.setWordWrap(True)
-            layout.addWidget(message)
         self.response = FloatingLabelComboBox('Response')
         for verb in row['_actions']:
             if verb in self.Labels:
@@ -616,6 +668,9 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.explanation = QLabel()
         self.explanation.setWordWrap(True)
         layout.addWidget(self.explanation)
+        self.offer_review = QWidget()
+        QVBoxLayout(self.offer_review).setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.offer_review)
         self.anchor_notice = QLabel()
         self.anchor_notice.setWordWrap(True)
         self.anchor_notice.setStyleSheet(f'color: {colors.WARNING_TEXT};')
@@ -624,25 +679,17 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.credential = self.credential_field.combo_box
         self.credential.setAccessibleName('Credential to disclose')
         layout.addWidget(self.credential_field)
-        self.create_button = LocksmithInvertedButton('Create credential…')
-        self.create_button.setStyleSheet(f'border: none; background: transparent; color: {colors.PRIMARY}; padding: 4px 0;')
+        self.create_button = LocksmithInvertedButton('Create another credential…')
         self.create_button.clicked.connect(self._create_credential)
-        layout.addWidget(self.create_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.preview = QWidget()
         QVBoxLayout(self.preview).setContentsMargins(0, 0, 0, 0)
         self.preview.setAccessibleName('Credential details')
         self.credential_details = CollapsibleSection(title='Review credential details')
         preview_layout = QVBoxLayout()
         preview_layout.addWidget(self.preview)
+        preview_layout.addWidget(self.create_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.credential_details.set_content_layout(preview_layout)
         layout.addWidget(self.credential_details)
-        self.message = LocksmithPlainTextEdit('Optional message')
-        self.message.setMaximumHeight(90)
-        self.options = CollapsibleSection(title='Add a message')
-        options_layout = QVBoxLayout()
-        options_layout.addWidget(self.message)
-        self.options.set_content_layout(options_layout)
-        layout.addWidget(self.options)
         self.error = QLabel()
         self.error.setTextFormat(Qt.TextFormat.PlainText)
         self.error.setWordWrap(True)
@@ -674,14 +721,43 @@ class ExchangeResponseDialog(LocksmithDialog):
         super().__init__(page, title=title, content=content, buttons=buttons,
                          show_title_divider=False)
         self.register_collapsible_section(history)
-        self.register_collapsible_section(self.options)
         self.register_collapsible_section(self.credential_details)
         cancel.clicked.connect(self.close)
         self.send_button.clicked.connect(self._send)
-        self.credential_field.currentIndexChanged.connect(self._preview)
+        self.credential_field.currentIndexChanged.connect(self._credential_changed)
         self.response.currentIndexChanged.connect(self._select_response)
+        self.response.combo_box.activated.connect(self._keep_response_choice)
         self._select_response()
-        self.fit_content(580)
+        self._choose_default_response()
+
+    def _keep_response_choice(self, *_):
+        self._default_response = False
+
+    def _credential_changed(self, *_):
+        self._choose_default_response()
+        self._preview()
+
+    def _choose_default_response(self):
+        """Prefer direct delivery of an issuer's exact response to its applicant."""
+        tip = self.row['messages'][-1]
+        if not self._default_response or tip.route != '/ipex/apply':
+            return
+        action = 'Offer'
+        said = self.credential.currentData()
+        sad = self._credentials.get(said, {})
+        attrs = sad.get('a')
+        if (said and not sad.get('r') and self.vault.db.issued.get((said,)) and sad.get('i') == tip.sad['ri']
+                and isinstance(attrs, Mapping) and attrs.get('i') == tip.pre
+                and ipexing.request_schema(tip) and 'Grant' in self.row['_actions']):
+            try:
+                _, artifacts, plan = ipexing._credential_evidence(self.vault, said)
+                requested = tip.sad['q']['dp']
+                plan[0][0][2] = requested[0][0][2]
+                if plan == requested and not artifacts:
+                    action = 'Grant'
+            except Exception:
+                pass  # The disclosure preview reports unavailable evidence.
+        self.response.setCurrentIndex(self.response.combo_box.findData(action))
 
     def _decline(self):
         self.response.setCurrentIndex(self.response.combo_box.findData('Spurn'))
@@ -705,7 +781,7 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.anchor_notice.setVisible(anchored)
         request = self.vault.hby.db.exns.get((tip.sad['p'],)) if tip.route == '/ipex/agree' else tip
         requested = ipexing.request_schema(request)
-        self.create_button.setVisible(disclose and tip.route == '/ipex/apply' and requested is not None)
+        self._can_create = disclose and tip.route == '/ipex/apply' and requested is not None
         self._credentials = {}
         selected = self.credential.currentData()
         self.credential_field.blockSignals(True)
@@ -714,17 +790,33 @@ class ExchangeResponseDialog(LocksmithDialog):
             for view in credentialing.credentials(self.vault):
                 if view['status']['et'] not in ('issued', 'authenticated'):
                     continue
+                try:
+                    ipexing._require_presenter(SerderACDC(sad=view['sad']), tip.sad['ri'], tip.pre)
+                except kering.ValidationError:
+                    continue
                 if requested and view['schema'].get('$id') != requested:
                     continue
                 said = view['sad']['d']
                 self._credentials[said] = view['sad']
                 self.credential.addItem(f"{credential_name(view['schema'])} · {self.page._name(view['recipient'])} · {said[:8]}…", said)
             offered = next((exn.sad['a']['o'][0] for exn in reversed(self.row['messages']) if exn.sad['a'].get('o')), None)
+            offer = next((exn for exn in reversed(self.row['messages']) if exn.route == '/ipex/offer'), None)
+            previews = exchanging.loadParsedNestedSubstreams(self.vault.hby, offer.said) if offer else []
+            if previews and previews[0].serder.sad.get('u') == '':
+                offered = None  # A metadata SAID is not an inventory credential identifier.
             if offered or selected:
                 self.credential.setCurrentIndex(self.credential.findData(offered or selected))
+            else:
+                matches = [said for said, sad in self._credentials.items()
+                           if (SerderACDC(sad=sad).iseaid == tip.pre or
+                               SerderACDC(sad=sad).iseaid == tip.sad['ri'])]
+                self.credential.setCurrentIndex(self.credential.findData(matches[0]) if len(matches) == 1 else -1)
             self.credential.setEnabled(not (offered and self.action == 'Grant'))
             self.credential_field.setVisible(not (offered and self.action == 'Grant'))
         self.credential_field.blockSignals(False)
+        if self._can_create and not self._credentials:
+            self.credential_field.hide()
+        self.create_button.setVisible(self._can_create and bool(self._credentials))
         self._preview()
 
     def _create_credential(self):
@@ -733,6 +825,9 @@ class ExchangeResponseDialog(LocksmithDialog):
             self.error.show()
             return
         tip = self.row['messages'][-1]
+        if ipexing.expiry_error(self.vault, tip):
+            self._preview()
+            return
         schema = ipexing.request_schema(tip)
         if self.vault.db.issuers.get((schema,)) != tip.sad['ri']:
             self.error.setText('Enable issuance for this schema with the identifier that received the request first.')
@@ -747,22 +842,74 @@ class ExchangeResponseDialog(LocksmithDialog):
     def _use_created_credential(self, said):
         self._select_response()
         self.credential.setCurrentIndex(self.credential.findData(said))
+        self._choose_default_response()
 
     def _return_from_issuance(self, *_):
         if self.page._current_vault() and self.page.vault is self.vault:
             self.open()
+            self.fit_content(580)
 
     def _preview(self, *_):
+        expired = ipexing.expiry_error(self.vault, self.row['messages'][-1])
         disclose = self.action in ('Offer', 'Grant')
-        self._show_credential(self._credentials.get(self.credential.currentData()) if disclose else self.row['_credential'])
-        self.credential_details.setVisible(disclose and self.preview.layout().count() > 0)
+        self._needs_creation = self._can_create and self.credential.currentIndex() < 0
+        self.send_button.setText('Create credential' if self._needs_creation else self.Labels[self.action])
+        self.explanation.setText(
+            'Create a credential for this application, then review and send it.'
+            if self._needs_creation else self.Help[self.action])
+        disclosure_error = self._show_credential(self._credentials.get(self.credential.currentData()) if disclose else None)
+        offer_error = self._show_offer()
+        self.credential_details.setVisible(disclose and (
+            self.preview.layout().count() > 0 or self._can_create and bool(self._credentials)))
         self.credential_details.update_content_height()
-        self.send_button.setEnabled(not self._anchor_error and (not disclose or self.credential.currentIndex() >= 0))
-        if disclose and self.credential.currentIndex() < 0:
-            self.error.setText('Choose an authenticated credential or create one for this request.')
+        self.send_button.setEnabled(not expired and not offer_error and not disclosure_error and not self._anchor_error and (
+            self._needs_creation or not disclose or self.credential.currentIndex() >= 0))
+        self.create_button.setEnabled(not expired)
+        self.decline_button.setEnabled(not expired)
+        self.response.setEnabled(not expired)
+        if expired:
+            self.error.setText(expired)
+        elif offer_error:
+            self.error.setText(offer_error)
+        elif disclosure_error:
+            self.error.setText(disclosure_error)
+        elif disclose and self.credential.currentIndex() < 0 and not self._needs_creation:
+            self.error.setText('No authenticated credential is available for this request.')
         else:
             self.error.clear()
         self.error.setVisible(bool(self.error.text()))
+        self.fit_content(580)
+
+    def _show_offer(self):
+        layout = self.offer_review.layout()
+        while layout.count():
+            widget = layout.takeAt(0).widget()
+            widget.setParent(None)
+            widget.deleteLater()
+        self.offer_review.setVisible(self.action == 'Agree')
+        if self.action != 'Agree':
+            return
+        offer = self.row['messages'][-1]
+        previews = exchanging.loadParsedNestedSubstreams(self.vault.hby, offer.said)
+        if not previews:
+            layout.addWidget(attribute_view('Offer details',
+                'This offer contains a reference only. Its issuer and rules have not been disclosed.'))
+            return
+        for index, nest in enumerate(previews):
+            sad = nest.serder.sad
+            if index:
+                schema = sad['s']
+                schemer = self.vault.hby.db.schema.get((schema,)) if isinstance(schema, str) else None
+                name = credential_name(schemer.sed if schemer else schema if isinstance(schema, Mapping) else {})
+                layout.addWidget(attribute_view('Linked credential', name))
+            layout.addWidget(attribute_view('Declared issuer', self.page._name(sad.get('i'))))
+            layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
+        note = QLabel('Agreeing signs a response to this offer. The credential is checked when it arrives; '
+                      'adding it to your wallet is a separate step. Linked credential values and terms '
+                      'are shown before you accept the Grant.')
+        note.setWordWrap(True)
+        note.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
+        layout.addWidget(note)
 
     def _show_credential(self, sad):
         layout = self.preview.layout()
@@ -770,40 +917,43 @@ class ExchangeResponseDialog(LocksmithDialog):
             widget = layout.takeAt(0).widget()
             widget.setParent(None)
             widget.deleteLater()
-        attrs = (sad or {}).get('a', {})
-        if not isinstance(attrs, dict) or not attrs:
+        if not sad:
             return
-        schema = sad.get('s')
-        if isinstance(schema, str):
-            schemer = self.vault.hby.db.schema.get((schema,))
-            schema = schemer.sed if schemer else {}
-        definition = (schema or {}).get('properties', {}).get('a', {})
-        definition = definition if isinstance(definition, dict) else {}
-        definition = next((item for item in definition.get('oneOf', [definition])
-                           if isinstance(item, dict) and item.get('type') == 'object'), {})
-        properties = definition.get('properties', {})
-        for key, value in attrs.items():
-            if key == 'd':
-                continue
-            prop = properties.get(key, {})
-            prop = prop if isinstance(prop, dict) else {}
-            title = prop.get('description', {'i': 'Recipient', 'dt': 'Date'}.get(key, key))
-            if key == 'i':
-                value = self.page._name(value)
-            layout.addWidget(attribute_view(title, value, prop))
+        try:
+            nodes = disclosed_credentials(self.vault, sad['d'])
+        except Exception as error:
+            self.credential_details.toggle_button.setText('  Credential options')
+            return f'Cannot prepare disclosure: {error}'
+        self.credential_details.toggle_button.setText('  Review data and terms to share')
+        if len(nodes) > 1:
+            count = len(nodes) - 1
+            timing = ('Only credential types and link paths are shared now. Their values and terms arrive with the Grant.'
+                      if self.action == 'Offer' else 'Their disclosed data and terms are shared with this message.')
+            self.explanation.setText(self.explanation.text() +
+                f' This includes {count} linked {"credential" if count == 1 else "credentials"}. {timing}')
+        for node in nodes:
+            layout.addWidget(credential_details(self.vault, node))
 
     def _send(self):
         if self.page.app.vault is not self.vault or not self.page._current_vault():
             self.error.setText('This vault is closed.')
             self.error.show()
             return
+        if ipexing.expiry_error(self.vault, self.row['messages'][-1]):
+            self._preview()
+            self.page.refresh()
+            return
+        if self._needs_creation:
+            self._create_credential()
+            return
         self.send_button.setEnabled(False)
         try:
             ipexing.respond(self.vault, self.row['messages'][-1].said, self.action,
-                            self.message.toPlainText().strip(), self.credential.currentData())
+                            credential_said=self.credential.currentData())
             self.accept()
         except Exception as error:
             self.error.setText(str(error))
             self.error.show()
             self.page.refresh()
             self.send_button.setEnabled(bool(ipexing.responses(self.vault, self.row['messages'][-1])))
+            self.fit_content(580)

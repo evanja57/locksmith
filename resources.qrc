@@ -128,5 +128,16 @@
         <file>assets/custom/flags/us.svg</file>
         <file>assets/custom/flags/de.svg</file>
         <file>assets/material-icons/swap_horiz.svg</file>
+        <file>assets/schemas/sedi/social-authorization.json</file>
+        <file>assets/schemas/sedi/organizational-unit.json</file>
+        <file>assets/schemas/sedi/guardianship.json</file>
+        <file>assets/schemas/sedi/iar.json</file>
+        <file>assets/schemas/sedi/bespoke-presentation.json</file>
+        <file>assets/schemas/sedi/issuing-agent.json</file>
+        <file>assets/schemas/sedi/residence.json</file>
+        <file>assets/schemas/sedi/facial-image-proof.json</file>
+        <file>assets/schemas/sedi/core-identity.json</file>
+        <file>assets/schemas/sedi/aid-replacement.json</file>
+        <file>assets/schemas/sedi/age.json</file>
     </qresource>
 </RCC>
