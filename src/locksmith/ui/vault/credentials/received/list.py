@@ -101,7 +101,8 @@ class ReceivedCredentialsListPage(BaseListPage):
         self.inventory.addItem('Verified presentations', False)
         self.inventory.currentIndexChanged.connect(
             lambda *_: self._load_received_credentials_data(reset_page=True))
-        self.table.header.add_action_button(self.inventory)
+        self.table.header.layout().addWidget(self.inventory)
+        self.setTabOrder(self.table.header.add_button, self.inventory.combo_box)
 
         logger.info("ReceivedCredentialsListPage initialized with table widget")
 

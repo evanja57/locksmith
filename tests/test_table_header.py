@@ -26,7 +26,7 @@ def test_received_header_keeps_title_search_and_actions_visible(qapp, width):
     header = page.table.header
     title = next(label for label in header.findChildren(QLabel) if label.text() == 'Received Credentials')
     import_button = next(button for button in header.findChildren(QPushButton) if button.text() == 'Import Grant…')
-    controls = [title, header.search_input, import_button, header.add_button]
+    controls = [title, header.search_input, import_button, header.add_button, page.inventory]
     rectangles = [QRect(widget.mapTo(header, QPoint()), widget.size()) for widget in controls]
 
     assert window.width() == width, 'The header must fit without expanding the page'
@@ -65,6 +65,8 @@ def test_received_toolbar_retains_search_actions_and_keyboard_order(qapp, monkey
     assert qapp.focusWidget() is header.add_button
     QTest.keyClick(header.add_button, Qt.Key.Key_Space)
     assert actions == ['Import', 'Apply']
+    QTest.keyClick(header.add_button, Qt.Key.Key_Tab)
+    assert qapp.focusWidget() is page.inventory.combo_box
 
 
 def test_existing_single_row_header_keeps_filter_search_and_add(qapp):
