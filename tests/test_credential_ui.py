@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from pathlib import Path
 import json
 import sys
 from types import MethodType, SimpleNamespace
@@ -182,12 +183,12 @@ def test_file_selection_returns_before_choice_and_closes_with_owner(wallet, tmp_
     assert picker.isVisible()
     picker.selectFile(str(source))
     picker.accept()
-    assert dialog.file_path_field.text() == str(source)
+    assert Path(dialog.file_path_field.text()) == source
     assert field.text() == expected
 
     dialog.browse_button.click()
     picker.reject()
-    assert dialog.file_path_field.text() == str(source)
+    assert Path(dialog.file_path_field.text()) == source
     assert field.text() == expected
     dialog.browse_button.click()
     assert picker.isVisible()
@@ -434,7 +435,9 @@ def test_issue_form_preserves_structured_attributes_and_schema_nonce(wallet, mon
     birth_date = dialog._dynamic_field_widgets['birthDate']['widget']
     assert birth_date.label.text() == 'Date of birth'
     proofing_time = dialog._dynamic_field_widgets['proofingDatetime']['widget']
-    assert dialog._dynamic_field_widgets['facialImageProof']['widget'].label.text() == 'Image typed media block SAID'
+    image_proof = dialog._dynamic_field_widgets['facialImageProof']['widget']
+    assert image_proof.toolTip() == 'Image typed media block SAID'
+    assert image_proof.line_edit.accessibleName() == 'Image typed media block SAID'
     fixed = dialog._dynamic_field_widgets['attestation']['widget']
     fixed.include.setChecked(True)
     assert [label.text() for label in fixed.fields['approved'][0].findChildren(QLabel)] == ['approved', 'Yes']
