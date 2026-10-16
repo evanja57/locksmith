@@ -30,7 +30,7 @@ class TableHeader(QWidget):
     """
     Header bar with icon, title, search field, and add button.
 
-    Search and actions can use a separate row below the title.
+    Search and actions can use separate rows below the title.
     """
 
     search_changed = Signal(str)
@@ -76,11 +76,15 @@ class TableHeader(QWidget):
             title_layout = QHBoxLayout()
             title_layout.setSpacing(16)
             layout.addLayout(title_layout)
+            self.search_layout = QHBoxLayout()
+            self.search_layout.setSpacing(16)
+            layout.addLayout(self.search_layout)
             self.toolbar_layout = QHBoxLayout()
             self.toolbar_layout.setSpacing(16)
             layout.addLayout(self.toolbar_layout)
         else:
             title_layout = layout
+            self.search_layout = layout
             self.toolbar_layout = layout
 
         # Icon (optional)
@@ -140,7 +144,7 @@ class TableHeader(QWidget):
             # Connect search signal
             self.search_input.line_edit.textChanged.connect(self.search_changed.emit)
 
-            self.toolbar_layout.addWidget(self.search_input)
+            self.search_layout.addWidget(self.search_input)
 
         if separate_toolbar:
             self.toolbar_layout.addStretch()

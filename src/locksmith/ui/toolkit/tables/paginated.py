@@ -121,7 +121,7 @@ class PaginatedTableWidget(QWidget):
             filter_func: Optional callback function to invoke when filter button is clicked.
                         When provided, a filter button appears to the left of the search box.
             parent: Parent widget
-            separate_toolbar: Put header search and actions on a row below the title
+            separate_toolbar: Put header search and actions below the title
         """
         super().__init__(parent)
 
