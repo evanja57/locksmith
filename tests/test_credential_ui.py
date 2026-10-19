@@ -5,7 +5,7 @@ import sys
 from types import MethodType, SimpleNamespace
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QCheckBox, QFileDialog, QLabel, QWidget
 from hio.base import doing
 from keri import kering
@@ -811,10 +811,29 @@ def test_disclosure_review_shows_retained_linked_data_and_terms(wallet):
     assert not private & shown
     assert credentialing.delete_credential(app.vault, source)
     dialog._preview()
-    assert 'Cannot prepare disclosure' in dialog.error.text()
+    assert 'Cannot prepare disclosure' in dialog.error_label.text()
+    assert QSignalSpy(dialog._dialog_resize_animation.finished).wait(1500)
+    assert dialog.error_banner.height() > 0
+    assert dialog.scroll_area.verticalScrollBar().maximum() == 0
     assert not dialog.send_button.isEnabled()
     assert not dialog.credential_details.isHidden()
     assert not dialog.create_button.isHidden()
+    dialog._max_dialog_height = dialog.height() - dialog.error_banner.height()
+    dialog.show_error(dialog.error_label.text())
+    assert QSignalSpy(dialog._dialog_resize_animation.finished).wait(1500)
+    assert dialog.height() == dialog._max_dialog_height
+    assert dialog.scroll_area.verticalScrollBar().isVisible()
+    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+    dialog.show_error(dialog.error_label.text())
+    assert QSignalSpy(dialog.error_animation.finished).wait(1500)
+    assert dialog.height() == dialog._max_dialog_height
+    assert dialog.scroll_area.verticalScrollBar().isVisible()
+    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+    dialog.response.setCurrentIndex(dialog.response.combo_box.findData('Spurn'))
+    assert dialog.error_banner.height() == 0
+    assert dialog.error_label.text() == ''
+    assert dialog.send_button.isEnabled()
+    assert dialog.scroll_area.verticalScrollBar().maximum() == 0
 
 
 def test_admit_dialog_retries_same_acknowledgment_and_disconnects_on_close(wallet, monkeypatch):
@@ -1579,7 +1598,7 @@ def test_offer_review_accepts_reference_and_metadata(wallet, metadata):
     review = page._response_dialog
     assert review.send_button.isEnabled()
     if metadata:
-        assert review.error.isHidden()
+        assert review.error_banner.height() == 0
     else:
         assert any('rules have not been disclosed' in label.text()
                    for label in review.offer_review.findChildren(QLabel))
@@ -1672,7 +1691,7 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
     response = page._response_dialog
     assert response.send_button.text() == 'Create credential' and response.send_button.isEnabled()
     assert response.credential_field.isHidden() and response.create_button.isHidden()
-    assert response.error.isHidden()
+    assert response.error_banner.height() == 0
     response.send_button.click()
     creation = response._issue_dialog
     assert creation.schema_dropdown.currentData() == schemer.said
@@ -1707,7 +1726,10 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
         # A valid reply arrives through another local action while review is open.
         ipexing.respond(app.vault, request.said, 'Spurn', 'Already answered')
         old_dialog.send_button.click()
-        assert 'changed' in old_dialog.error.text()
+        assert 'changed' in old_dialog.error_label.text()
+        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
+        assert old_dialog.error_banner.height() > 0
+        assert old_dialog.scroll_area.verticalScrollBar().maximum() == 0
     else:
         deadline = helping.fromIso8601(request.stamp) + timedelta(milliseconds=app.hby.db.kramCTYP.get('~').xl)
         monkeypatch.setattr(helping, 'nowUTC', lambda: deadline)
@@ -1720,8 +1742,22 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
             assert not list(app.hby.db.kramTMSC.getTopItemIter())
             assert app.hby.db.kramXDT.get((request.sad['x'],)) is None
         old_dialog.send_button.click()
-        assert 'application has expired' in old_dialog.error.text()
-        assert 'Ask the holder' in old_dialog.error.text()
+        assert 'application has expired' in old_dialog.error_label.text()
+        assert 'Ask the holder' in old_dialog.error_label.text()
+        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
+        assert old_dialog.error_banner.height() > 0
+        expired_height = old_dialog.height()
+        old_dialog.credential_details.toggle_button.click()
+        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
+        assert old_dialog.height() > expired_height
+        old_dialog.credential_details.toggle_button.click()
+        assert QSignalSpy(old_dialog.credential_details._content_animation.finished).wait(1500)
+        assert old_dialog.height() == expired_height
+        old_dialog._send()
+        old_dialog._send()
+        assert QSignalSpy(old_dialog._dialog_resize_animation.finished).wait(1500)
+        assert old_dialog.height() == expired_height
+        assert old_dialog.error_banner.height() > 0
         assert not old_dialog.send_button.isEnabled()
         assert not old_dialog.create_button.isEnabled()
         assert old_dialog.scroll_area.verticalScrollBar().maximum() == 0

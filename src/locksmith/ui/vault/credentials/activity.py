@@ -690,12 +690,6 @@ class ExchangeResponseDialog(LocksmithDialog):
         preview_layout.addWidget(self.create_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.credential_details.set_content_layout(preview_layout)
         layout.addWidget(self.credential_details)
-        self.error = QLabel()
-        self.error.setTextFormat(Qt.TextFormat.PlainText)
-        self.error.setWordWrap(True)
-        self.error.setStyleSheet(f'color: {colors.DANGER};')
-        self.error.hide()
-        layout.addWidget(self.error)
         history = CollapsibleSection(title='Exchange details')
         history_layout = QVBoxLayout()
         details = QTextEdit()
@@ -720,6 +714,8 @@ class ExchangeResponseDialog(LocksmithDialog):
             row['Status'], 'Credential exchange')
         super().__init__(page, title=title, content=content, buttons=buttons,
                          show_title_divider=False)
+        self.error_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.error_animation.finished.connect(self._re_enable_scrollbars)
         self.register_collapsible_section(history)
         self.register_collapsible_section(self.credential_details)
         cancel.clicked.connect(self.close)
@@ -729,6 +725,13 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.response.combo_box.activated.connect(self._keep_response_choice)
         self._select_response()
         self._choose_default_response()
+
+    def show_error(self, message):
+        previous_height = self._current_banner_height if self._base_height is not None else 0
+        super().show_error(message)
+        self._base_content_height += self._current_banner_height - previous_height
+        self._dialog_resize_animation.stop()
+        self._update_dialog_height(self._calculate_target_height())
 
     def _keep_response_choice(self, *_):
         self._default_response = False
@@ -767,8 +770,6 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.action = self.response.currentData()
         self.send_button.setText(self.Labels[self.action])
         self.explanation.setText(self.Help[self.action])
-        self.error.clear()
-        self.error.hide()
         disclose = self.action in ('Offer', 'Grant')
         self.credential_field.setVisible(disclose)
         tip = self.row['messages'][-1]
@@ -821,8 +822,7 @@ class ExchangeResponseDialog(LocksmithDialog):
 
     def _create_credential(self):
         if not self.page._current_vault() or self.page.vault is not self.vault:
-            self.error.setText('This vault is closed.')
-            self.error.show()
+            self.show_error('This vault is closed.')
             return
         tip = self.row['messages'][-1]
         if ipexing.expiry_error(self.vault, tip):
@@ -830,8 +830,7 @@ class ExchangeResponseDialog(LocksmithDialog):
             return
         schema = ipexing.request_schema(tip)
         if self.vault.db.issuers.get((schema,)) != tip.sad['ri']:
-            self.error.setText('Enable issuance for this schema with the identifier that received the request first.')
-            self.error.show()
+            self.show_error('Enable issuance for this schema with the identifier that received the request first.')
             return
         self._issue_dialog = IssueCredentialDialog(self.page.app, self.page, request_said=tip.said)
         self._issue_dialog.credential_created.connect(self._use_created_credential)
@@ -847,7 +846,7 @@ class ExchangeResponseDialog(LocksmithDialog):
     def _return_from_issuance(self, *_):
         if self.page._current_vault() and self.page.vault is self.vault:
             self.open()
-            self.fit_content(580)
+            self._preview()
 
     def _preview(self, *_):
         expired = ipexing.expiry_error(self.vault, self.row['messages'][-1])
@@ -867,18 +866,17 @@ class ExchangeResponseDialog(LocksmithDialog):
         self.create_button.setEnabled(not expired)
         self.decline_button.setEnabled(not expired)
         self.response.setEnabled(not expired)
-        if expired:
-            self.error.setText(expired)
-        elif offer_error:
-            self.error.setText(offer_error)
-        elif disclosure_error:
-            self.error.setText(disclosure_error)
-        elif disclose and self.credential.currentIndex() < 0 and not self._needs_creation:
-            self.error.setText('No authenticated credential is available for this request.')
-        else:
-            self.error.clear()
-        self.error.setVisible(bool(self.error.text()))
+        error = expired or offer_error or disclosure_error
+        if not error and disclose and self.credential.currentIndex() < 0 and not self._needs_creation:
+            error = 'No authenticated credential is available for this request.'
+        self.clear_error(resize_dialog=False)
+        self.error_animation.stop()
+        self.error_banner.setMaximumHeight(0)
+        self.error_label.clear()
+        self._base_height = None
         self.fit_content(580)
+        if error:
+            self.show_error(error)
 
     def _show_offer(self):
         layout = self.offer_review.layout()
@@ -937,8 +935,7 @@ class ExchangeResponseDialog(LocksmithDialog):
 
     def _send(self):
         if self.page.app.vault is not self.vault or not self.page._current_vault():
-            self.error.setText('This vault is closed.')
-            self.error.show()
+            self.show_error('This vault is closed.')
             return
         if ipexing.expiry_error(self.vault, self.row['messages'][-1]):
             self._preview()
@@ -953,8 +950,6 @@ class ExchangeResponseDialog(LocksmithDialog):
                             credential_said=self.credential.currentData())
             self.accept()
         except Exception as error:
-            self.error.setText(str(error))
-            self.error.show()
+            self.show_error(str(error))
             self.page.refresh()
             self.send_button.setEnabled(bool(ipexing.responses(self.vault, self.row['messages'][-1])))
-            self.fit_content(580)
