@@ -4,8 +4,8 @@ These 11 public schema definitions ship with Locksmith as Qt resources under
 `:/assets/schemas/sedi/`. They are draft definitions, version 0.1.0.
 
 Source: [Keripy tests/sedi/test_sedi.py at d0d5af47](https://github.com/WebOfTrust/keripy/blob/d0d5af47f7967192ca18889e614b9b8f055f5f7d/tests/sedi/test_sedi.py).
-This is Locksmith's current locked Keripy revision. The JSON preserves each
-source definition and its field order. Filenames describe the credential type.
+The JSON preserves each source definition and its field order independently
+of Locksmith's current dependency pin. Filenames describe the credential type.
 The embedded `$id` identifies the exact schema.
 
 | Schema | File | SAID |

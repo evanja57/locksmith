@@ -154,15 +154,20 @@ def service(qapp):
     qapp.processEvents()
 
 
+def _advance(runner, qapp):
+    qapp.processEvents()
+    runner.tyme = monotonic()
+    runner.recur()
+    sleep(0.001)
+
+
 def _run(doer, qapp):
-    runner = doing.Doist(doers=[doer], tock=0.01)
+    runner = doing.Doist(doers=[doer], tyme=monotonic(), tock=0.0)
     runner.enter()
     try:
         deadline = monotonic() + 4
         while not doer.done and monotonic() < deadline:
-            qapp.processEvents()
-            runner.recur()
-            sleep(0.001)
+            _advance(runner, qapp)
         assert doer.done
     finally:
         runner.exit()
@@ -225,13 +230,16 @@ def test_observer_reports_rejected_signer_ingress(wallets, service, qapp, status
     assert receiver.rgy.store.head(registry.regk) is None
 
 
-def test_registry_timeout_aborts_request(wallets, service, qapp):
+def test_registry_timeout_aborts_request(wallets, service, qapp, monkeypatch):
     sender, _ = wallets
     hab, _, registry, _ = _issue(sender)
     url, state, requests = service
-    state['respond'] = lambda method, path, body: None
     doer = registries.RegistrySyncDoer(sender, hab, registry.regk, registrar_url=url)
-    doer.Timeout = 0.05
+    clock = [monotonic()]
+    monkeypatch.setattr(registries, 'monotonic', lambda: clock[0])
+    def stall(method, path, body):
+        clock[0] += doer.Timeout + 1
+    state['respond'] = stall
     _run(doer, qapp)
     assert requests
     assert 'timed out' in doer.error
@@ -263,14 +271,12 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
     worker.Refresh = 0.05
     assert not worker.ensure(registry.regk, holder)
     assert not worker.ensure(registry.regk, holder)  # Repeated UI reads coalesce.
-    runner = doing.Doist(doers=[worker], tock=0.01)
+    runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
     runner.enter()
     def until(predicate):
         deadline = monotonic() + 5
         while not predicate() and monotonic() < deadline:
-            qapp.processEvents()
-            runner.recur()
-            sleep(0.001)
+            _advance(runner, qapp)
         assert predicate()
     try:
         until(lambda: worker.ensure(registry.regk, holder))
@@ -299,7 +305,7 @@ def test_registry_worker_rebuilds_requests_and_refreshes_revocation(wallets, ser
     assert not worker._active
     # A replacement worker must discover accepted heads and fetch them again.
     worker = registries.RegistryEvidenceDoer(receiver)
-    runner = doing.Doist(doers=[worker], tock=0.01)
+    runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
     runner.enter()
     try:
         until(lambda: [path for method, path, _ in requests if method == 'POST'].count('/changed/') == 2)
@@ -319,7 +325,7 @@ def test_registry_worker_without_services_stays_idle(wallets, qapp):
     worker = registries.RegistryEvidenceDoer(sender)
     assert not worker.ensure(registry.regk, issuer)
     assert 'observer' in worker.errors[registry.regk]
-    runner = doing.Doist(doers=[worker], tock=0.01)
+    runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
     runner.enter()
     try:
         for _ in range(5):
@@ -340,23 +346,19 @@ def test_registry_worker_publishes_owned_history_without_registry_cache(wallets,
     state['respond'] = lambda method, path, body: (200, json.dumps({
         'accepted': {registry.regk: 2}, 'pending': {}, 'rejected': {}}).encode())
     worker = registries.RegistryEvidenceDoer(sender)
-    runner = doing.Doist(doers=[worker], tock=0.01)
+    runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
     runner.enter()
     try:
         deadline = monotonic() + 4
         while not worker.published(registry.regk) and monotonic() < deadline:
-            qapp.processEvents()
-            runner.recur()
-            sleep(0.001)
+            _advance(runner, qapp)
         assert worker.published(registry.regk)
         assert [path for method, path, _ in requests if method == 'POST'] == ['/ingest']
         sender.hby.cf.put({'registries': {'registrar': url + '/changed'}})
         assert not worker.published(registry.regk)
         deadline = monotonic() + 4
         while not worker.published(registry.regk) and monotonic() < deadline:
-            qapp.processEvents()
-            runner.recur()
-            sleep(0.001)
+            _advance(runner, qapp)
         assert worker.published(registry.regk)
         assert [path for method, path, _ in requests if method == 'POST'] == ['/ingest', '/changed/ingest']
     finally:
@@ -375,6 +377,9 @@ def test_observer_refresh_waits_for_native_issuer_anchor(wallets, service, qapp,
     _, update = registrar.issue(registry, acdc=acdc, state='revoked')
     _anchor(issuer, registry, update)
     queries, closed = [], []
+    clock = [monotonic()]
+    if outcome == 'timeout':
+        monkeypatch.setattr(registries, 'monotonic', lambda: clock[0])
 
     # Replace only network delivery. The native AnchorQuerier still waits for
     # the replay to pass Kevery and for the exact accepted seal to be present.
@@ -389,6 +394,8 @@ def test_observer_refresh_waits_for_native_issuer_anchor(wallets, service, qapp,
                 yield self.tock
                 if outcome == 'failure':
                     raise kering.ColdStartError('bad child framing')
+                if outcome == 'timeout':
+                    clock[0] += worker.Timeout + 1
                 if outcome == 'replay':
                     _copy_kel(issuer, receiver)
                 while True:
@@ -400,16 +407,14 @@ def test_observer_refresh_waits_for_native_issuer_anchor(wallets, service, qapp,
     state['respond'] = lambda method, path, body: ((204, b'') if method == 'PUT'
                                                   else (200, sender.rgy.store.cloneTel(registry.regk)))
     worker = registries.RegistrySyncDoer(receiver, holder, registry.regk, observer_url=url)
-    worker.Timeout = 2.0 if outcome == 'replay' else 0.1
+    worker.Timeout = 2.0
     if outcome == 'close':
-        runner = doing.Doist(doers=[worker], tock=0.01)
+        runner = doing.Doist(doers=[worker], tyme=monotonic(), tock=0.0)
         runner.enter()
         try:
             deadline = monotonic() + 3
             while not queries and monotonic() < deadline:
-                qapp.processEvents()
-                runner.recur()
-                sleep(0.001)
+                _advance(runner, qapp)
             assert queries
         finally:
             runner.exit()
@@ -526,14 +531,12 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
         worker = registries.RegistrySyncDoer(
             receiver, holder, registry.regk,
             observer_url=f'http://127.0.0.1:{servant.ha[1]}')
-        runner = doing.Doist(doers=[ctx, http.ServerDoer(server=server), worker], tock=0.01)
+        runner = doing.Doist(doers=[ctx, http.ServerDoer(server=server), worker], tyme=monotonic(), tock=0.0)
         runner.enter()
         try:
             deadline = monotonic() + 5
             while not worker.done and monotonic() < deadline:
-                qapp.processEvents()
-                runner.recur()
-                sleep(0.001)
+                _advance(runner, qapp)
             assert worker.done
             assert worker.error == ''
             assert hby.kevers[holder.pre].sn == holder.kever.sn

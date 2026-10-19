@@ -91,7 +91,7 @@ def wallet(qapp, mailbox_routes):
         qapp.processEvents()
 
 
-def schema(require_issuee=True):
+def schema(require_issuee=True, *, composed=False):
     fields = {key: {'type': 'string'} for key in ('v', 't', 'd', 'i', 'rd', 's')}
     fields['a'] = {'type': 'object', 'properties': {
         'd': {'type': 'string'}, 'i': {'type': 'string'}, 'dt': {'type': 'string'},
@@ -99,15 +99,20 @@ def schema(require_issuee=True):
     }, 'required': ['d', 'i', 'dt', 'nickname'], 'additionalProperties': False}
     if not require_issuee:
         fields['a']['required'].remove('i')
+    required = list(fields)
+    if composed:
+        fields['u'] = {'type': 'string'}
+        fields['a'] = {'oneOf': [{'type': 'string'}, fields['a']]}
     return scheming.Schemer(sed={
-        '$id': '', '$schema': 'http://json-schema.org/draft-07/schema#',
+        '$id': '', '$schema': 'https://json-schema.org/draft/2020-12/schema',
+        'version': '1.0.0',
         'title': 'Native Credential', 'type': 'object', 'properties': fields,
-        'required': list(fields), 'additionalProperties': False,
+        'required': required, 'additionalProperties': False,
     })
 
 
 def issue(app, hab, recipient, authentication='registry', rules=None):
-    schemer = schema(require_issuee=recipient is not None)
+    schemer = schema(require_issuee=recipient is not None, composed=True)
     if authentication != 'registry':
         sad = schemer.sed
         sad['$id'] = ''
@@ -726,10 +731,19 @@ def test_disclosure_review_shows_retained_linked_data_and_terms(wallet):
     for dialog in (direct, incoming):
         assert expected <= {label.text() for label in dialog.findChildren(QLabel)}
     offer = ipexing.start(app.vault, issuer, holder.pre, 'Offer', credential_said=origin)
-    preview, = exchanging.loadParsedNestedSubstreams(app.hby, offer)
-    assert preview.serder.sad['u'] == ''
+    previews = exchanging.loadParsedNestedSubstreams(app.hby, offer)
+    assert len(previews) == 2
+    assert all(preview.serder.sad['u'] == '' for preview in previews)
     offered = exchanging.serializeMessage(app.hby, offer)
-    assert all(value.encode() not in offered for value in expected | {origin, source})
+    disclosed = app.hby.db.exns.get((offer,)).raw + b''.join(nest.serder.raw for nest in previews)
+    assert terms['l'].encode() in disclosed
+    private = {node.serder.sad['a']['LEI'] for node in nodes} | {origin, source}
+    assert all(value.encode() not in disclosed for value in private)
+    from locksmith.ui.vault.credentials.start import StartExchangeDialog
+    start = StartExchangeDialog(app, parent, 'Offer', credential_said=origin)
+    shown = {label.text() for label in start.preview.findChildren(QLabel)}
+    assert terms['l'] in shown
+    assert not private & shown
     ipexing.respond(app.vault, offer, 'Agree')
     page = CredentialActivityPage(parent)
     page.set_vault_name('linked-disclosure-ui')
@@ -751,7 +765,10 @@ def test_disclosure_review_shows_retained_linked_data_and_terms(wallet):
     page._on_row_action(row, 'Review')
     dialog = page._response_dialog
     dialog.credential.setCurrentIndex(dialog.credential.findData(origin))
-    assert 'terms are shared now' not in dialog.explanation.text()
+    assert 'terms are shared now' in dialog.explanation.text()
+    shown = {label.text() for label in dialog.preview.findChildren(QLabel)}
+    assert terms['l'] in shown
+    assert not private & shown
     assert credentialing.delete_credential(app.vault, source)
     dialog._preview()
     assert 'Cannot prepare disclosure' in dialog.error.text()
@@ -1471,7 +1488,7 @@ def test_grant_matches_requested_schema_and_previewed_origin(wallet, preview):
                                            modifiers={'dp': [[[requested, '/', []]]]})
         ipexing.prepare(app.vault, holder, request, atc)
         offer, atc = native_ipexing.offer(issuer, '',
-            ipexing._offer_preview(first_proof) if preview else first_proof,
+            ipexing._offer_previews({first.said: first.sad})[0] if preview else first_proof,
             artifacts=[] if preview else None, apply=request)
         ipexing.prepare(app.vault, issuer, offer, atc)
         agree, atc = native_ipexing.agree(holder, '', offer)
@@ -1509,7 +1526,7 @@ def test_offer_review_accepts_reference_and_metadata(wallet, metadata):
     issuer, holder = app.hby.makeHab(name='issuer'), app.hby.makeHab(name='holder')
     acdc, proof, _ = issue(app, issuer, holder.pre, authentication='anchor')
     origin = acdcmap(israid=issuer.pre, uuid='', schema=acdc.schema,
-                     attribute=ipexing._offer_preview(proof).sad['a']) if metadata else proof
+                     attribute=ipexing._offer_previews({acdc.said: acdc.sad})[0].sad['a']) if metadata else proof
     offer, atc = native_ipexing.offer(issuer, '', origin, recp=holder.pre,
                                     artifacts=[] if metadata else None,
                                     modifiers={'dp': [[[acdc.schema, '/', []]]]})
@@ -1602,7 +1619,7 @@ def test_activity_receives_verified_remote_request_and_clears_stale_response(wal
     parent.app = app
     page = CredentialActivityPage(parent)
     page.set_vault_name('activity-local')
-    schemer = schema()
+    schemer = schema(composed=True)
     app.hby.db.schema.pin((schemer.said,), schemer)
     app.vault.db.issuers.pin((schemer.said,), issuer.pre)
     request, atc = native_ipexing.apply(holder, issuer.pre, 'Need a credential',

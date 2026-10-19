@@ -191,11 +191,22 @@ def test_grant_collects_shared_sources_without_hiding_inventory_after_deletion(i
     holder = app.hby.makeHab(name='holder')
     offered = ipexing.start(app.vault, hab, holder.pre, 'Offer', credential_said=child)
     previews = exchanging.loadParsedNestedSubstreams(app.hby, offered)
-    preview, = previews
-    assert preview.serder.said not in {child, source, sibling, leaf_a, leaf_b}
-    assert preview.serder.sad['u'] == preview.serder.sad['a'] == ''
-    assert 'e' not in preview.serder.sad and 'rd' not in preview.serder.sad
-    assert b'254900OPPU84GM83MG36' not in exchanging.serializeMessage(app.hby, offered)
+    # Both leaves and both parents make identical public promises.
+    assert len(previews) == 3
+    private_saids = {child, source, sibling, leaf_a, leaf_b}
+    assert not private_saids & {nest.serder.said for nest in previews}
+    assert all(nest.serder.sad['u'] == nest.serder.sad['a'] == nest.serder.sad['rd'] == ''
+               for nest in previews)
+    root_edges = previews[0].serder.sad['e']
+    assert root_edges['source_a']['n'] == root_edges['source_b']['n'] == root_edges['sibling']['n']
+    disclosed = app.hby.db.exns.get((offered,)).raw + b''.join(nest.serder.raw for nest in previews)
+    assert not any(value.encode() in disclosed for value in private_saids)
+    assert credentialing.credential(app.vault, child)['sad']['rd'].encode() not in disclosed
+    assert b'254900OPPU84GM83MG36' not in disclosed
+    agreed = ipexing.respond(app.vault, offered, 'Agree')
+    negotiated = ipexing.respond(app.vault, agreed, 'Grant', credential_said=child)
+    assert app.vault.exc.complete(negotiated)
+    assert len(exchanging.loadParsedNestedSubstreams(app.hby, negotiated)) == 5
 
     assert credentialing.delete_credential(app.vault, source)
     assert {view['sad']['d'] for view in credentialing.credentials(app.vault)} == {child, sibling, leaf_a, leaf_b}
@@ -279,11 +290,17 @@ def test_native_grant_requires_evidence_schema_and_consent_before_inventory(ipex
     for sn in (0, 1):
         receiver.vault.rgy.store.accept(regk, sn, sender.vault.rgy.store.seqEvent(regk, sn))
     _retry_ipex(receiver.vault)
-    assert receiver.vault.exc.complete(grant.said)
+    assert not receiver.vault.exc.complete(grant.said)
+    assert receiver.hby.db.emse.get((grant.said, schema.said)) is not None
     assert not credentialing.credentials(receiver.vault)
-    with pytest.raises(kering.ValidationError, match='Load credential schema'):
+    with pytest.raises(kering.ValidationError):
         ipexing.admit(receiver.vault, holder, grant.said)
+    assert receiver.vault.db.receipts.get((holder.pre, grant.said)) is None
     receiver.hby.db.schema.pin((schema.said,), schema)
+    _retry_ipex(receiver.vault)
+    assert receiver.vault.exc.complete(grant.said)
+    assert receiver.hby.db.emse.get((grant.said, schema.said)) is None
+    assert not credentialing.credentials(receiver.vault)
     admit, atc = ipexing.admit(receiver.vault, holder, grant.said)
     assert receiver.vault.exc.complete(admit.said)
     _deliver_ipex(sender.vault, admit.raw + atc)

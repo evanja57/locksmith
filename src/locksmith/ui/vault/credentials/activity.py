@@ -634,7 +634,7 @@ class ExchangeResponseDialog(LocksmithDialog):
 
     Labels = {'Offer': 'Send offer', 'Grant': 'Send credential',
               'Agree': 'Agree and request', 'Spurn': 'Decline'}
-    Help = {'Offer': 'Sends the issuer, credential type, and terms now. Credential values are sent after agreement.',
+    Help = {'Offer': 'Sends credential links and the issuers, types, and terms below. Credential values are sent after agreement.',
             'Grant': 'Sends the credential values now. The recipient can review them before adding the credential.',
             'Agree': 'Credential values are not shared yet. Agree to request them, then review them before adding the credential.',
             'Spurn': 'This ends the exchange.'}
@@ -750,7 +750,7 @@ class ExchangeResponseDialog(LocksmithDialog):
                 and isinstance(attrs, Mapping) and attrs.get('i') == tip.pre
                 and ipexing.request_schema(tip) and 'Grant' in self.row['_actions']):
             try:
-                _, artifacts, plan = ipexing._credential_evidence(self.vault, said)
+                _, artifacts, plan, _ = ipexing._credential_evidence(self.vault, said)
                 requested = tip.sad['q']['dp']
                 plan[0][0][2] = requested[0][0][2]
                 if plan == requested and not artifacts:
@@ -905,7 +905,7 @@ class ExchangeResponseDialog(LocksmithDialog):
             layout.addWidget(attribute_view('Declared issuer', self.page._name(sad.get('i'))))
             layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
         note = QLabel('Agreeing signs a response to this offer. The credential is checked when it arrives; '
-                      'adding it to your wallet is a separate step. Linked credential values and terms '
+                      'adding it to your wallet is a separate step. Credential values '
                       'are shown before you accept the Grant.')
         note.setWordWrap(True)
         note.setStyleSheet(f'color: {colors.TEXT_SECONDARY};')
@@ -920,14 +920,15 @@ class ExchangeResponseDialog(LocksmithDialog):
         if not sad:
             return
         try:
-            nodes = disclosed_credentials(self.vault, sad['d'])
+            nodes = disclosed_credentials(self.vault, sad['d'], metadata=self.action == 'Offer')
         except Exception as error:
             self.credential_details.toggle_button.setText('  Credential options')
             return f'Cannot prepare disclosure: {error}'
-        self.credential_details.toggle_button.setText('  Review data and terms to share')
+        self.credential_details.toggle_button.setText(
+            '  Review metadata and terms to share' if self.action == 'Offer' else '  Review data and terms to share')
         if len(nodes) > 1:
             count = len(nodes) - 1
-            timing = ('Only credential types and link paths are shared now. Their values and terms arrive with the Grant.'
+            timing = ('Their issuers, types, links, and terms are shared now. Their values arrive with the Grant.'
                       if self.action == 'Offer' else 'Their disclosed data and terms are shared with this message.')
             self.explanation.setText(self.explanation.text() +
                 f' This includes {count} linked {"credential" if count == 1 else "credentials"}. {timing}')

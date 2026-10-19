@@ -6,7 +6,8 @@ from locksmith.core import credentialing, ipexing
 from locksmith.core.habbing import list_eligible_local_identifiers
 from locksmith.ui.toolkit.widgets import LocksmithButton, LocksmithDialog, LocksmithInvertedButton
 from locksmith.ui.toolkit.widgets.fields import FloatingLabelComboBox
-from locksmith.ui.vault.credentials.presentation import credential_name, identifier_name
+from locksmith.ui.vault.credentials.presentation import (credential_details, credential_name,
+                                                        disclosed_credentials, identifier_name)
 from locksmith.ui.vault.remotes.add import AddRemoteIdentifierDialog
 
 
@@ -18,14 +19,15 @@ class StartExchangeDialog(LocksmithDialog):
     def __init__(self, app, parent, action, *, schema=None, credential_said=None, received=False):
         self.app, self.vault, self.action = app, app.vault, action
         self.received = received
+        self._offer_error = ''
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(16)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         if action == 'Offer':
-            explanation = QLabel('Shares the issuer, credential types, link paths, and this credential’s terms. '
-                                 'Values and linked credential terms are sent after agreement.')
+            explanation = QLabel('Shares credential links and the issuers, types, and terms below. '
+                                 'Credential values are sent after agreement.')
             explanation.setWordWrap(True)
             layout.addWidget(explanation)
         self.sender = FloatingLabelComboBox('Your identifier')
@@ -53,6 +55,11 @@ class StartExchangeDialog(LocksmithDialog):
             self.selection.setCurrentIndex(self.selection.combo_box.findData(selected))
             self.selection.setEnabled(False)
         layout.addWidget(self.selection)
+        self.preview = QWidget()
+        preview_layout = QVBoxLayout(self.preview)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview.setVisible(action == 'Offer')
+        layout.addWidget(self.preview)
         self.error = QLabel()
         self.error.setTextFormat(Qt.TextFormat.PlainText)
         self.error.setWordWrap(True)
@@ -106,6 +113,20 @@ class StartExchangeDialog(LocksmithDialog):
             pre = (view['sad']['i'] if not self.received and self.vault.db.issued.get((said,))
                    else view['subject'])
             self.sender.setCurrentIndex(self.sender.combo_box.findData(pre))
+        if self.action == 'Offer':
+            layout = self.preview.layout()
+            while layout.count():
+                widget = layout.takeAt(0).widget()
+                widget.setParent(None)
+                widget.deleteLater()
+            self._offer_error = ''
+            try:
+                if self.selection.currentData():
+                    for node in disclosed_credentials(self.vault, self.selection.currentData(), metadata=True):
+                        layout.addWidget(credential_details(self.vault, node))
+            except Exception as error:
+                self._offer_error = str(error)
+            self.fit_content(540)
         self._check_route()
 
     def _check_route(self, *_):
@@ -114,9 +135,9 @@ class StartExchangeDialog(LocksmithDialog):
             return
         hab = self.vault.hby.habByPre(self.sender.currentData())
         recipient = self.recipient.currentData()
-        error = ''
+        error = self._offer_error
         missing_recipient = False
-        if hab is not None and recipient and recipient != hab.pre:
+        if hab is not None and recipient and recipient != hab.pre and not error:
             try:
                 ipexing._require_route(hab, recipient)
             except ipexing.MissingRouteError as ex:

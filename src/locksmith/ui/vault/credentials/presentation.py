@@ -4,8 +4,7 @@ from collections.abc import Mapping
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from keri.help import helping
-from keri import kering
-from keri.core import Saider, parsing
+from keri.core import Saider
 
 from locksmith.core import ipexing
 from locksmith.ui import colors
@@ -66,13 +65,12 @@ def rules_text(rules):
     return values or 'Rule text has not been disclosed.'
 
 
-def disclosed_credentials(vault, said):
+def disclosed_credentials(vault, said, *, metadata=False):
     """Read the same retained nodes that the Grant builder will send."""
-    view, artifacts, _ = ipexing._credential_evidence(vault, said)
-    return [view['sad']] + [
-        parsing.Parser().parse(ims=bytearray(stream), processive=False,
-                               version=kering.Vrsn_2_0)[0].serder.sad
-        for stream in artifacts]
+    _, _, _, nodes = ipexing._credential_evidence(vault, said)
+    if metadata:
+        return [node.sad for node in ipexing._offer_previews(nodes)]
+    return list(nodes.values())
 
 
 def credential_details(vault, sad, *, identity=True):
@@ -101,7 +99,7 @@ def credential_details(vault, sad, *, identity=True):
             prop = prop if isinstance(prop, Mapping) else {}
             layout.addWidget(attribute_view(attribute_label(name, prop), value, prop))
     elif attrs is not None:
-        layout.addWidget(attribute_view('Attributes', 'Only a commitment is disclosed.'))
+        layout.addWidget(attribute_view('Attributes', 'Withheld until the Grant.' if attrs == '' else 'Only a commitment is disclosed.'))
     if 'A' in sad:
         layout.addWidget(attribute_view('Disclosed aggregate', sad['A']))
     layout.addWidget(attribute_view('Terms', rules_text(sad['r']) if sad.get('r') else 'No rules attached.'))
