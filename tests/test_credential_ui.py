@@ -61,6 +61,46 @@ def test_table_row_actions_support_keyboard_navigation(qapp):
         table.close()
 
 
+def test_dialog_refits_wrapped_text_after_scrolling(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QStyleFactory
+    from locksmith.ui.toolkit.widgets.dialogs import LocksmithDialog
+
+    line = 'A line that fits the full viewport.'
+    text = '\n'.join([line] * 3)
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet('font-size: 16px;')
+    dialog = LocksmithDialog(content=label, show_close_button=False, show_title_divider=False)
+    style = QStyleFactory.create('Windows')
+    style.setParent(dialog)
+    dialog.scroll_area.setStyle(style)
+    dialog.scroll_area.verticalScrollBar().setStyle(style)
+    label.ensurePolished()
+    margins = dialog.content_layout.contentsMargins()
+    width = label.fontMetrics().horizontalAdvance(line) + margins.left() + margins.right() + 1
+    long_text = '\n'.join([text] * 100)
+    dialog.open()
+    label.setText(long_text)
+    dialog.setFixedSize(width, label.fontMetrics().height())
+    qapp.processEvents()
+    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+
+    # Each line fits at full width but wraps when the old scrollbar consumes space.
+    label.setText(text)
+    dialog.fit_content(width)
+    qapp.processEvents()
+    assert dialog.scroll_area.verticalScrollBar().maximum() == 0
+    assert dialog.scroll_area.viewport().width() == dialog.scroll_area.maximumViewportSize().width()
+
+    label.setText(long_text)
+    dialog.fit_content(width)
+    qapp.processEvents()
+    assert dialog.scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    assert dialog.scroll_area.verticalScrollBar().maximum() > 0
+    dialog.close()
+
+
 @pytest.fixture
 def wallet(qapp, mailbox_routes):
     with ExitStack() as contexts:

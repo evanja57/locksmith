@@ -747,6 +747,8 @@ class LocksmithDialog(QDialog):
         """Fit current content and update the base height for collapsible sections."""
         if self._dialog_resize_animation is not None:
             self._dialog_resize_animation.stop()
+        # Remove the old scrollbar's width before measuring wrapped content.
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFixedWidth(width)
         self.layout().activate()
         self.content_layout.invalidate()
