@@ -9,5 +9,6 @@ interface, including the bundled KERI Foundation implementation.
    :caption: Contents
 
    developer-guide
+   credential-exchange
    plugin-authoring
    kerifoundation-plugin

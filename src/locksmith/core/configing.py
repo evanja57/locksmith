@@ -87,6 +87,7 @@ class LocksmithConfig:
         return cls._instance
 
     def __init__(self):
+        self.base = os.environ.get('LOCKSMITH_BASE', '')
         environment = os.environ.get('LOCKSMITH_ENVIRONMENT')
         match environment:
             case Environments.PRODUCTION.value:
