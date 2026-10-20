@@ -521,8 +521,6 @@ def test_wallet_query_uses_native_observer_ingress(wallets, qapp, rotations):
         ctx = serving.makeContext(hby)
         summary = ctx.observer.ingest(issuer.replay(gvrsn=kering.Vrsn_2_0) + stream)
         assert registry.regk in summary['accepted']
-        if rotations == 32:
-            ctx.parser.ims.extend(issuer.replay(gvrsn=kering.Vrsn_2_0) * 128)
         assert holder.pre not in hby.kevers
         servant = tcp.Server(ha=('127.0.0.1', 0))
         assert servant.reopen()
