@@ -10,7 +10,7 @@ from hio.core.http import httping
 from keri import help, kering
 from keri.acdc import acdcmap, ipexing
 from keri.app import agenting, forwarding
-from keri.core import Compactor, Noncer, Saider, SerderACDC, SerderKERI, parsing
+from keri.core import Compactor, Saider, SerderACDC, SerderKERI, parsing
 from keri.help import helping
 from keri.peer import exchanging
 
@@ -41,20 +41,8 @@ class IpexHandler(ipexing.IpexHandler):
                     self.hby.db.kevers[issuer]
                 except KeyError:
                     pass
-        if not super().verify(serder, attachments=attachments, nests=nests,
-                              sscs=sscs, evidence=evidence):
-            return False
-        if serder.route == '/ipex/grant' and serder.sad['p']:
-            prior = self.hby.db.exns.get((serder.sad['p'],))
-            if prior.route == '/ipex/agree':
-                offer = self.hby.db.exns.get((prior.sad['p'],))
-                previews = exchanging.loadParsedNestedSubstreams(self.hby, offer.said) if offer else []
-                if previews and not _offer_matches(offer, previews, serder, nests):
-                    return False
-                if not previews and offer.sad['a'].get('o'):
-                    if serder.sad['a'].get('o') != offer.sad['a']['o']:
-                        return False
-        return True
+        return super().verify(serder, attachments=attachments, nests=nests,
+                              sscs=sscs, evidence=evidence)
 
     def handle(self, serder, attachments=None, nests=None, sscs=None):
         if serder.pre not in self.hby.prefixes:
@@ -108,64 +96,6 @@ def _edge_nodes(sad):
             labels = ipexing.EdgeGroupLabels if nested else ipexing.EdgeSectionLabels
             groups.extend((node, path + label + '/', True)
                           for label, node in group.items() if label not in labels)
-
-
-def _match_edges(previous, current, offered, pending, *, nested=False):
-    """Compare edge topology and operators, pairing metadata and disclosed nodes."""
-    if isinstance(previous, list):
-        return (isinstance(current, list) and len(previous) == len(current)
-                and all(_match_edges(left, right, offered, pending)
-                        for left, right in zip(previous, current)))
-    if not isinstance(previous, Mapping):
-        return previous == current
-    if not isinstance(current, Mapping) or (previous.keys() - {'d', 'u'} != current.keys() - {'d', 'u'}):
-        return False
-    if 'n' in previous:
-        if any(previous[label] != current[label] for label in previous if label not in ('d', 'u', 'n')):
-            return False
-        if previous['n'] in offered:
-            pending.append((previous['n'], current['n']))
-            return True
-        return previous['n'] == current['n']
-    labels = ipexing.EdgeGroupLabels if nested else ipexing.EdgeSectionLabels
-    return all(previous[label] == current[label] if label in labels
-               else _match_edges(previous[label], current[label], offered, pending, nested=True)
-               for label in previous if label not in ('d', 'u'))
-
-
-def _offer_matches(offer, previews, grant, nests):
-    """Bind every populated metadata field to each corresponding disclosed node."""
-    offered = {nest.serder.said: nest.serder for nest in previews}
-    disclosed = {(nest['serder'] if isinstance(nest, dict) else nest.serder).said:
-                 (nest['serder'] if isinstance(nest, dict) else nest.serder) for nest in nests or []}
-    pending = [(offer.sad['a']['o'][0], grant.sad['a']['o'][0])]
-    seen = set()
-    while pending:
-        previous, current = pending.pop()
-        if (previous, current) in seen:
-            continue
-        seen.add((previous, current))
-        preview, actual = offered[previous], disclosed.get(current)
-        if actual is None or actual.sad.get('u') == '':
-            return False
-        if preview.sad.get('u') != '':
-            if preview.said != actual.said:
-                return False
-        else:
-            committed = SerderACDC(sad=preview.sad, makify=True, compactify=True).sad
-            content = SerderACDC(sad=actual.sad, makify=True, compactify=True).sad
-            expanded_edges = isinstance(preview.sad.get('e'), (Mapping, list))
-            if any(content.get(label) != value for label, value in committed.items()
-                   if label not in ('v', 'd', 'u') and not (label == 'e' and expanded_edges)
-                   and value not in ('', None)):
-                return False
-            if expanded_edges and not _match_edges(preview.sad['e'], actual.sad.get('e'), offered, pending):
-                return False
-        if preview.sad.get('u') != '':
-            actual_edges = {path: said for said, path in _edge_nodes(actual.sad)}
-            pending.extend((said, actual_edges.get(path)) for said, path in _edge_nodes(preview.sad)
-                           if said in offered)
-    return {previous for previous, _ in seen} == offered.keys()
 
 
 def _reachable(hab, pre):
@@ -338,9 +268,12 @@ def grant(vault, hab, credential_said, recipient, message=''):
                          modifiers={'dp': plan}, kind=kering.Kinds.json)
 
 
-def _offer_previews(nodes):
-    """Build a metadata DAG with public terms and fresh edge commitments."""
-    previews = {}
+def _offer_preview(original):
+    """Disclose root metadata without changing any populated commitment."""
+    if original.get('e'):
+        raise kering.ValidationError(
+            'Offers for linked credentials are not supported yet. '
+            'This wallet cannot yet offer their terms while keeping credential references private.')
 
     def public_rules(rules):
         if isinstance(rules, Mapping):
@@ -360,47 +293,17 @@ def _offer_previews(nodes):
                 return
             raise kering.ValidationError('Disclose rule text before offering this credential')
 
-    def edges(group, *, nested=False):
-        if isinstance(group, list):
-            return [edges(block) for block in group]
-        if not isinstance(group, Mapping):
-            raise kering.ValidationError('Disclose credential links before offering this credential')
-        labels = ipexing.EdgeNodeLabels if 'n' in group else (
-            ipexing.EdgeGroupLabels if nested else ipexing.EdgeSectionLabels)
-        result = {label: group[label] for label in dict.fromkeys([*labels, *group]) if label in group}
-        if result.get('u'):
-            result['u'] = Noncer().qb64
-        if 'n' in group:
-            result['n'] = preview(group['n']).said
-        else:
-            for label, value in group.items():
-                if label not in labels:
-                    result[label] = edges(value, nested=True)
-        if not nested:
-            compactor = Compactor(mad=result, makify=True, compactify=True, kind=kering.Kinds.json)
-            return list(compactor.partials.values())[-1].mad if compactor.partials else compactor.mad
-        return result
-
-    def preview(said):
-        if said not in previews:
-            original = nodes[said]
-            rules = original.get('r')
-            public_rules(rules)
-            if isinstance(rules, Mapping):
-                compactor = Compactor(mad=rules, makify=True, compactify=True, kind=kering.Kinds.json)
-                rules = list(compactor.partials.values())[-1].mad if compactor.partials else compactor.mad
-            fields = {'aggregate': ''} if 'A' in original else {'attribute': ''}
-            if original.get('e'):
-                fields['edge'] = edges(original['e'])
-            elif 'e' in original:
-                fields['edge'] = original['e']
-            previews[said] = acdcmap(israid=original['i'], ilk=original.get('t'), uuid='',
-                                     regid='' if 'rd' in original else None,
-                                     schema=original['s'], rule=rules,
-                                     kind=kering.Kinds.json, **fields)
-        return previews[said]
-
-    return list({node.said: node for node in (preview(said) for said in nodes)}.values())
+    rules = original.get('r')
+    public_rules(rules)
+    if isinstance(rules, Mapping):
+        compactor = Compactor(mad=rules, makify=True, compactify=True, kind=kering.Kinds.json)
+        rules = list(compactor.partials.values())[-1].mad if compactor.partials else compactor.mad
+    fields = {'aggregate': ''} if 'A' in original else {'attribute': ''}
+    if 'e' in original:
+        fields['edge'] = original['e']
+    return acdcmap(israid=original['i'], ilk=original.get('t'), uuid='',
+                   regid='' if 'rd' in original else None,
+                   schema=original['s'], rule=rules, kind=kering.Kinds.json, **fields)
 
 
 def request_schema(exn):
@@ -426,11 +329,11 @@ def start(vault, hab, recipient, action, message='', *, schema=None, credential_
                                  modifiers={'dp': [[[schema, '/', []]]]}, ax=ax,
                                  kind=kering.Kinds.json)
     elif action == 'Offer':
-        view, artifacts, plan, nodes = _credential_evidence(vault, credential_said, hab)
+        view, artifacts, plan, _ = _credential_evidence(vault, credential_said, hab)
         _require_presenter(SerderACDC(sad=view['sad']), hab.pre, recipient)
-        previews = _offer_previews(nodes)
-        exn, atc = ipexing.offer(hab, message, previews[0], recp=recipient,
-                                 artifacts=previews[1:],
+        preview = _offer_preview(view['sad'])
+        exn, atc = ipexing.offer(hab, message, preview, recp=recipient,
+                                 artifacts=[],
                                  modifiers={'dp': plan}, ax=ax,
                                  kind=kering.Kinds.json)
     else:
@@ -511,7 +414,7 @@ def respond(vault, said, action, message='', credential_said=None):
         return exn.said
     _require_route(hab, prior.pre, reply=action != 'Spurn')
     if action in ('Offer', 'Grant'):
-        view, artifacts, plan, nodes = _credential_evidence(vault, credential_said, hab)
+        view, artifacts, plan, _ = _credential_evidence(vault, credential_said, hab)
         _require_presenter(SerderACDC(sad=view['sad']), hab.pre, prior.pre)
         request = (vault.hby.db.exns.get((prior.sad['p'],))
                    if prior.route == '/ipex/agree' else prior)
@@ -532,9 +435,9 @@ def respond(vault, said, action, message='', credential_said=None):
         if schema:
             plan[0][0][2] = requested[0][0][2]
         if action == 'Offer':
-            previews = _offer_previews(nodes)
-            exn, atc = ipexing.offer(hab, message, previews[0], apply=prior,
-                                    artifacts=previews[1:],
+            preview = _offer_preview(view['sad'])
+            exn, atc = ipexing.offer(hab, message, preview, apply=prior,
+                                    artifacts=[],
                                     modifiers={'dp': plan}, ax=prior.sad['a'].get('ax'),
                                     kind=kering.Kinds.json)
         else:

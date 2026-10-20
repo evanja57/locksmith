@@ -69,7 +69,7 @@ def disclosed_credentials(vault, said, *, metadata=False):
     """Read the same retained nodes that the Grant builder will send."""
     _, _, _, nodes = ipexing._credential_evidence(vault, said)
     if metadata:
-        return [node.sad for node in ipexing._offer_previews(nodes)]
+        return [ipexing._offer_preview(nodes[said]).sad]
     return list(nodes.values())
 
 

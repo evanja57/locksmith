@@ -634,7 +634,7 @@ class ExchangeResponseDialog(LocksmithDialog):
 
     Labels = {'Offer': 'Send offer', 'Grant': 'Send credential',
               'Agree': 'Agree and request', 'Spurn': 'Decline'}
-    Help = {'Offer': 'Sends credential links and the issuers, types, and terms below. Credential values are sent after agreement.',
+    Help = {'Offer': 'Sends the issuer, credential type, and terms below. Credential values are sent after agreement.',
             'Grant': 'Sends the credential values now. The recipient can review them before adding the credential.',
             'Agree': 'Credential values are not shared yet. Agree to request them, then review them before adding the credential.',
             'Spurn': 'This ends the exchange.'}
@@ -926,8 +926,7 @@ class ExchangeResponseDialog(LocksmithDialog):
             '  Review metadata and terms to share' if self.action == 'Offer' else '  Review data and terms to share')
         if len(nodes) > 1:
             count = len(nodes) - 1
-            timing = ('Their issuers, types, links, and terms are shared now. Their values arrive with the Grant.'
-                      if self.action == 'Offer' else 'Their disclosed data and terms are shared with this message.')
+            timing = 'Their disclosed data and terms are shared with this message.'
             self.explanation.setText(self.explanation.text() +
                 f' This includes {count} linked {"credential" if count == 1 else "credentials"}. {timing}')
         for node in nodes:

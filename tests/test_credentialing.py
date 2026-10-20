@@ -189,24 +189,16 @@ def test_grant_collects_shared_sources_without_hiding_inventory_after_deletion(i
     assert {nest.serder.said for nest in nested} == {child, source, sibling, leaf_a, leaf_b}
 
     holder = app.hby.makeHab(name='holder')
-    offered = ipexing.start(app.vault, hab, holder.pre, 'Offer', credential_said=child)
-    previews = exchanging.loadParsedNestedSubstreams(app.hby, offered)
-    # Both leaves and both parents make identical public promises.
-    assert len(previews) == 3
-    private_saids = {child, source, sibling, leaf_a, leaf_b}
-    assert not private_saids & {nest.serder.said for nest in previews}
-    assert all(nest.serder.sad['u'] == nest.serder.sad['a'] == nest.serder.sad['rd'] == ''
-               for nest in previews)
-    root_edges = previews[0].serder.sad['e']
-    assert root_edges['source_a']['n'] == root_edges['source_b']['n'] == root_edges['sibling']['n']
-    disclosed = app.hby.db.exns.get((offered,)).raw + b''.join(nest.serder.raw for nest in previews)
-    assert not any(value.encode() in disclosed for value in private_saids)
-    assert credentialing.credential(app.vault, child)['sad']['rd'].encode() not in disclosed
-    assert b'254900OPPU84GM83MG36' not in disclosed
-    agreed = ipexing.respond(app.vault, offered, 'Agree')
-    negotiated = ipexing.respond(app.vault, agreed, 'Grant', credential_said=child)
-    assert app.vault.exc.complete(negotiated)
-    assert len(exchanging.loadParsedNestedSubstreams(app.hby, negotiated)) == 5
+    outbox = list(app.vault.db.outbox.getTopItemIter())
+    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
+        ipexing.start(app.vault, hab, holder.pre, 'Offer', credential_said=child)
+    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
+    request = ipexing.start(app.vault, holder, hab.pre, 'Apply', schema=schema.said)
+    outbox = list(app.vault.db.outbox.getTopItemIter())
+    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
+        ipexing.respond(app.vault, request, 'Offer', credential_said=child)
+    assert app.hby.db.erpy.get((request,)) is None
+    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
 
     assert credentialing.delete_credential(app.vault, source)
     assert {view['sad']['d'] for view in credentialing.credentials(app.vault)} == {child, sibling, leaf_a, leaf_b}
@@ -561,24 +553,19 @@ def test_retained_graph_rechecks_linked_issuer_evidence(ipex_vaults):
     ipexing.admit(receiver.vault, holder, grants[0].said)
     assert receiver.vault.db.accepted.get((source,)) is None
     assert ipexing.grant(receiver.vault, holder, origin, issuer.pre)[0].route == '/ipex/grant'
-    offer = ipexing.start(receiver.vault, holder, issuer.pre, 'Offer', credential_said=origin)
-    offered = receiver.hby.db.exns.get((offer,))
-    assert offered.route == '/ipex/offer'
-    assert offered.sad['q']['dp'] == grants[0].sad['q']['dp']
+    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
+        ipexing.start(receiver.vault, holder, issuer.pre, 'Offer', credential_said=origin)
     apply = ipexing.start(sender.vault, issuer, holder.pre, 'Apply', schema=schema.said)
     _deliver_ipex(receiver.vault, exchanging.serializeMessage(sender.hby, apply))
     with pytest.raises(ValueError, match='agreed disclosure plan'):
         ipexing.respond(receiver.vault, apply, 'Grant', credential_said=origin)
+    with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
+        ipexing.respond(receiver.vault, apply, 'Offer', credential_said=origin)
     assert receiver.hby.db.erpy.get((apply,)) is None
-    offer = ipexing.respond(receiver.vault, apply, 'Offer', credential_said=origin)
-    assert receiver.hby.db.exns.get((offer,)).sad['q']['dp'] == grants[0].sad['q']['dp']
-    _deliver_ipex(sender.vault, exchanging.serializeMessage(receiver.hby, offer))
-    agree = ipexing.respond(sender.vault, offer, 'Agree')
-    _deliver_ipex(receiver.vault, exchanging.serializeMessage(sender.hby, agree))
-    presentation = ipexing.respond(receiver.vault, agree, 'Grant', credential_said=origin)
-    assert receiver.hby.db.exns.get((presentation,)).sad['q']['dp'] == [[]]
-    _deliver_ipex(sender.vault, exchanging.serializeMessage(receiver.hby, presentation))
-    assert sender.vault.exc.complete(presentation)
+    # Explicit presentation still verifies and carries the original graph.
+    presentation, atc = ipexing.grant(receiver.vault, holder, origin, issuer.pre)
+    _deliver_ipex(sender.vault, ipexing.prepare(receiver.vault, holder, presentation, atc))
+    assert sender.vault.exc.complete(presentation.said)
     issuer.rotate()
     _deliver_ipex(receiver.vault, identifier_introduction(issuer))
     assert credentialing.credential(receiver.vault, origin)['status']['et'] == 'authenticated'

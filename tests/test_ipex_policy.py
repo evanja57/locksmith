@@ -96,6 +96,56 @@ def test_metadata_offer_binds_rules_before_admission(ipex_vaults, substitute):
         ipexing.admit(target.vault, holder, grant.said)
 
 
+def test_legacy_linked_offer_can_be_declined_after_reopen(ipex_vaults):
+    source, target = ipex_vaults('legacy-issuer'), ipex_vaults('legacy-holder')
+    issuer, holder = source.hby.makeHab(name='issuer'), target.hby.makeHab(name='holder')
+    schema = _load_schema(source, issuer)
+    target.hby.db.schema.pin((schema.said,), schema)
+    _introduce(source, target)
+    _introduce(target, source)
+    leaf = _issue(source, schema, holder, authentication='signature')
+    said = _issue(source, schema, holder, authentication='signature',
+                  edges={'source': {'n': leaf, 's': schema.said}})
+    _, _, plan, _ = ipexing._credential_evidence(source.vault, said)
+    # Older wallets replaced real child references with metadata references.
+    child = acdcmap(israid=issuer.pre, uuid='', schema=schema.said, attribute='')
+    root = acdcmap(israid=issuer.pre, uuid='', schema=schema.said, attribute='',
+                   edge={'d': '', 'source': {'n': child.said, 's': schema.said}})
+    offer, atc = native.offer(issuer, '', root, recp=holder.pre, artifacts=[child],
+                              modifiers={'dp': plan}, kind=kering.Kinds.json)
+    _deliver_ipex(target.vault, ipexing.prepare(source.vault, issuer, offer, atc))
+    agree = ipexing.respond(target.vault, offer.said, 'Agree')
+    _deliver_ipex(source.vault, exchanging.serializeMessage(target.hby, agree))
+    source.close_vault()
+    target.close_vault()
+    source, target = ipex_vaults('legacy-issuer'), ipex_vaults('legacy-holder')
+    issuer, holder = source.hby.habByName('issuer'), target.hby.habByName('holder')
+    _introduce(source, target)
+
+    outbox = list(source.vault.db.outbox.getTopItemIter())
+    with pytest.raises(kering.ValidationError, match='protocol verification'):
+        ipexing.respond(source.vault, agree, 'Grant', credential_said=said)
+    assert list(source.vault.db.outbox.getTopItemIter()) == outbox
+    assert source.hby.db.erpy.get((agree,)) is None
+
+    view, artifacts, _, _ = ipexing._credential_evidence(source.vault, said)
+    grant, atc = native.grant(issuer, holder.pre, '', view['proof'], artifacts=artifacts,
+                              agree=source.hby.db.exns.get((agree,)),
+                              modifiers={'dp': [[]]}, kind=kering.Kinds.json)
+    _deliver_ipex(target.vault, grant.raw + atc)
+    assert not target.vault.exc.complete(grant.said)
+    assert target.vault.db.receipts.get((holder.pre, grant.said)) is None
+    assert target.vault.db.accepted.get((said,)) is None
+    assert target.hby.db.erpy.get((agree,)) is None
+
+    spurn = ipexing.respond(source.vault, agree, 'Spurn')
+    _deliver_ipex(target.vault, exchanging.serializeMessage(source.hby, spurn))
+    for app in (source, target):
+        exchange, = ipexing.exchanges(app.vault)
+        assert exchange['messages'][-1].said == spurn
+        assert exchange['actions'] == []
+
+
 @pytest.mark.parametrize('invalid', [False, True])
 def test_admission_validates_linked_schema_and_nested_group_evidence(ipex_vaults, invalid):
     source, target = ipex_vaults('dag-issuer'), ipex_vaults('dag-holder')
@@ -187,6 +237,14 @@ def test_bundled_sedi_metadata_negotiation_withholds_registry_and_attributes(ipe
         rules={'d': '', 'l': 'Use only to verify issuing authority.'})
     originals = {key: credentialing.credential(source.vault, key)['sad'] for key in (said, unit)}
     _introduce(source, target)
+    if profile == 'issuing-agent':
+        outbox = list(source.vault.db.outbox.getTopItemIter())
+        exchanges = list(source.hby.db.exns.getTopItemIter())
+        with pytest.raises(kering.ValidationError, match='Offers for linked credentials'):
+            ipexing.start(source.vault, issuer, holder.pre, 'Offer', credential_said=said)
+        assert list(source.vault.db.outbox.getTopItemIter()) == outbox
+        assert list(source.hby.db.exns.getTopItemIter()) == exchanges
+        return
     offered = ipexing.start(source.vault, issuer, holder.pre, 'Offer', credential_said=said)
     stream = exchanging.serializeMessage(source.hby, offered)
     previews = exchanging.loadParsedNestedSubstreams(source.hby, offered)
@@ -202,16 +260,6 @@ def test_bundled_sedi_metadata_negotiation_withholds_registry_and_attributes(ipe
             mad=original['r'], makify=True, compactify=True, kind=kering.Kinds.json).said
         private.update((original['d'], original['u'], original['rd'], original['a']['u'],
                         Compactor(mad=original['a'], makify=True, compactify=True, kind=kering.Kinds.json).said))
-        if original.get('e'):
-            assert list(preview.sad['e'])[:2] == ['d', 'u']
-            assert list(preview.sad['e']['orgUnit']) == ['d', 'u', 'n', 's', 'o']
-            private.update((original['e']['orgUnit']['d'], original['e']['orgUnit']['u']))
-            assert preview.sad['e']['orgUnit']['u'] != original['e']['orgUnit']['u']
-            private.update((original['e']['u'], Compactor(
-                mad=original['e'], makify=True, compactify=True, kind=kering.Kinds.json).said))
-            assert preview.sad['e']['u'] != original['e']['u']
-            assert preview.sad['e']['orgUnit']['n'] == previews[1].serder.said
-            assert preview.sad['e']['orgUnit']['o'] == 'I2I'
         assert holder.pre.encode() not in preview.raw
     disclosed = source.hby.db.exns.get((offered,)).raw + b''.join(nest.serder.raw for nest in previews)
     assert not [value for value in private if value and value.encode() in disclosed]
@@ -234,67 +282,6 @@ def test_bundled_sedi_metadata_negotiation_withholds_registry_and_attributes(ipe
     assert credentialing.credential(target.vault, said, received=True)['sad'] == originals[said]
 
 
-@pytest.mark.parametrize('field', ['i', 's', 'rd', 'a', 'e', 'r'])
-def test_metadata_populated_commitments_cannot_change(field):
-    from types import SimpleNamespace
-    from keri.core import Diger, SerderACDC
-
-    first, second = (Diger(ser=value).qb64 for value in (b'first', b'second'))
-    values = dict(i=first, s=first, rd=first, a=first, e={'d': '', 'source': {'n': first}},
-                  r={'d': '', 'terms': 'Agreed'})
-    metadata = acdcmap(israid=values['i'], uuid='', schema=values['s'], regid=values['rd'],
-                       attribute=values['a'], edge=values['e'], rule=values['r'])
-    changed = deepcopy(metadata.sad)
-    changed['u'] = Noncer().qb64
-    if field == 'e':
-        changed['e'] = {'d': '', 'source': {'n': second}}
-    elif field == 'r':
-        changed['r'] = {'d': '', 'terms': 'Different'}
-    else:
-        changed[field] = second
-    actual = SerderACDC(sad=changed, makify=True)
-    offer = SimpleNamespace(sad={'a': {'o': [metadata.said]}})
-    grant = SimpleNamespace(sad={'a': {'o': [actual.said]}})
-    assert not ipexing._offer_matches(offer, [SimpleNamespace(serder=metadata)],
-                                     grant, [SimpleNamespace(serder=actual)])
-
-
-@pytest.mark.parametrize('change', [None, 'issuer', 'rules', 'operator', 'extra-edge', 'metadata'])
-def test_metadata_dag_binds_each_occurrence_even_when_leaf_metadata_collapses(change):
-    from types import SimpleNamespace
-    from keri.core import Compactor, Diger
-
-    issuer, other = (Diger(ser=value).qb64 for value in (b'issuer', b'other'))
-    leaves = [acdcmap(israid=issuer, schema=issuer, uuid=Noncer().qb64,
-                      attribute={'d': '', 'value': index}, rule={'d': '', 'l': 'Public terms'})
-              for index in range(2)]
-
-    def root(children, operator='AND', extra=False):
-        edges = {'d': '', 'u': Noncer().qb64, 'group': {
-            'd': '', 'u': Noncer().qb64, 'o': operator,
-            **{f'child{index}': {'n': leaf.said, 's': leaf.schema} for index, leaf in enumerate(children)}}}
-        if extra:
-            edges['extra'] = {'n': children[0].said, 's': children[0].schema}
-        compactor = Compactor(mad=edges, makify=True, compactify=True, kind=kering.Kinds.json)
-        return acdcmap(israid=issuer, schema=issuer, uuid=Noncer().qb64, attribute={'d': '', 'value': 'origin'},
-                        edge=list(compactor.partials.values())[-1].mad)
-
-    original = root(leaves)
-    previews = ipexing._offer_previews({node.said: node.sad for node in [original, *leaves]})
-    assert len(previews) == 2  # Distinct private leaves make the same public promise.
-    assert previews[0].sad['e']['group']['child0']['n'] == previews[0].sad['e']['group']['child1']['n']
-    if change in ('issuer', 'rules', 'metadata'):
-        leaves[1] = acdcmap(israid=other if change == 'issuer' else issuer, schema=issuer,
-                            uuid='' if change == 'metadata' else Noncer().qb64,
-                            attribute={'d': '', 'value': 1},
-                            rule={'d': '', 'l': 'Changed terms' if change == 'rules' else 'Public terms'})
-    actual = root(leaves, operator='OR' if change == 'operator' else 'AND', extra=change == 'extra-edge')
-    offer = SimpleNamespace(sad={'a': {'o': [previews[0].said]}})
-    grant = SimpleNamespace(sad={'a': {'o': [actual.said]}})
-    assert ipexing._offer_matches(offer, [SimpleNamespace(serder=node) for node in previews],
-                                  grant, [SimpleNamespace(serder=node) for node in [actual, *leaves]]) is (change is None)
-
-
 @pytest.mark.parametrize('form', ['blinded', 'nested-blinded', 'compact', 'public-reference'])
 def test_metadata_offer_distinguishes_public_text_from_staged_rule_disclosure(form):
     from keri.core import Diger
@@ -309,14 +296,14 @@ def test_metadata_offer_distinguishes_public_text_from_staged_rule_disclosure(fo
     original = acdcmap(israid=Diger(ser=b'issuer').qb64, uuid=Noncer().qb64,
                        attribute={'d': '', 'value': 'Private'}, rule=rules)
     if form == 'public-reference':
-        preview, = ipexing._offer_previews({original.said: original.sad})
+        preview = ipexing._offer_preview(original.sad)
         assert preview.sad['r']['l'] == original.sad['r']['l']
         from keri.core import Saider
         assert Saider(qb64=preview.sad['r']['d']).verify(sad=preview.sad['r'], kind=kering.Kinds.json)
     else:
         message = 'Disclose rule text' if form == 'compact' else 'staged terms negotiation'
         with pytest.raises(kering.ValidationError, match=message):
-            ipexing._offer_previews({original.said: original.sad})
+            ipexing._offer_preview(original.sad)
 
 
 @pytest.mark.parametrize('revoked_node', ['origin', 'linked'])

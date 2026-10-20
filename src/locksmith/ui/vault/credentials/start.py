@@ -26,7 +26,7 @@ class StartExchangeDialog(LocksmithDialog):
         layout.setSpacing(16)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         if action == 'Offer':
-            explanation = QLabel('Shares credential links and the issuers, types, and terms below. '
+            explanation = QLabel('Shares the issuer, credential type, and terms below. '
                                  'Credential values are sent after agreement.')
             explanation.setWordWrap(True)
             layout.addWidget(explanation)

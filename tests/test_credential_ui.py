@@ -747,7 +747,7 @@ def test_grant_notification_and_file_acceptance_use_verified_native_evidence(
     assert not app.vault.db.receipts.get((holder.pre, grant.said)).send
 
 
-def test_disclosure_review_shows_retained_linked_data_and_terms(wallet):
+def test_disclosure_review_shows_linked_data_and_blocks_private_offers(wallet):
     from test_credentialing import _load_schema, _issue
     from locksmith.core import credentialing
 
@@ -770,45 +770,32 @@ def test_disclosure_review_shows_retained_linked_data_and_terms(wallet):
     incoming = AcceptGrantDialog(app, parent, grant.said, save=False)
     for dialog in (direct, incoming):
         assert expected <= {label.text() for label in dialog.findChildren(QLabel)}
-    offer = ipexing.start(app.vault, issuer, holder.pre, 'Offer', credential_said=origin)
-    previews = exchanging.loadParsedNestedSubstreams(app.hby, offer)
-    assert len(previews) == 2
-    assert all(preview.serder.sad['u'] == '' for preview in previews)
-    offered = exchanging.serializeMessage(app.hby, offer)
-    disclosed = app.hby.db.exns.get((offer,)).raw + b''.join(nest.serder.raw for nest in previews)
-    assert terms['l'].encode() in disclosed
-    private = {node.serder.sad['a']['LEI'] for node in nodes} | {origin, source}
-    assert all(value.encode() not in disclosed for value in private)
     from locksmith.ui.vault.credentials.start import StartExchangeDialog
     start = StartExchangeDialog(app, parent, 'Offer', credential_said=origin)
-    shown = {label.text() for label in start.preview.findChildren(QLabel)}
-    assert terms['l'] in shown
-    assert not private & shown
-    ipexing.respond(app.vault, offer, 'Agree')
-    page = CredentialActivityPage(parent)
-    page.set_vault_name('linked-disclosure-ui')
-    row = next(row for row in page._rows if row['root'] == offer and row['_key'][1] == 0)
-    page._on_row_action(row, 'Review')
-    dialog = page._response_dialog
-    dialog.credential.setCurrentIndex(dialog.credential.findData(origin))
-    assert '1 linked credential' in dialog.explanation.text()
-    assert expected <= {label.text() for label in dialog.preview.findChildren(QLabel)}
-    dialog.send_button.click()
-    sent = app.hby.db.erpy.get((row['messages'][-1].said,)).qb64
-    disclosed = exchanging.loadParsedNestedSubstreams(app.hby, sent)
-    assert {node.serder.said for node in disclosed} == {origin, source}
-    assert {node.serder.sad['a']['LEI'] for node in disclosed} <= expected
+    start.recipient.setCurrentIndex(start.recipient.combo_box.findData(holder.pre))
+    assert start.sender.currentData() == issuer.pre
+    assert start.recipient.currentData() == holder.pre
+    assert 'Offers for linked credentials' in start.error.text()
+    assert not start.send_button.isEnabled()
+    assert not start.preview.findChildren(QLabel)
+    outbox = list(app.vault.db.outbox.getTopItemIter())
+    start.send_button.click()
+    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
 
     request = ipexing.start(app.vault, holder, issuer.pre, 'Apply', schema=schemer.said)
-    page.refresh()
+    page = CredentialActivityPage(parent)
+    page.set_vault_name('linked-disclosure-ui')
     row = next(row for row in page._rows if row['root'] == request and row['_actions'])
     page._on_row_action(row, 'Review')
     dialog = page._response_dialog
     dialog.credential.setCurrentIndex(dialog.credential.findData(origin))
-    assert 'terms are shared now' in dialog.explanation.text()
-    shown = {label.text() for label in dialog.preview.findChildren(QLabel)}
-    assert terms['l'] in shown
-    assert not private & shown
+    assert 'Offers for linked credentials' in dialog.error_label.text()
+    assert not dialog.send_button.isEnabled()
+    assert not dialog.preview.findChildren(QLabel)
+    outbox = list(app.vault.db.outbox.getTopItemIter())
+    dialog.send_button.click()
+    assert app.hby.db.erpy.get((request,)) is None
+    assert list(app.vault.db.outbox.getTopItemIter()) == outbox
     assert credentialing.delete_credential(app.vault, source)
     dialog._preview()
     assert 'Cannot prepare disclosure' in dialog.error_label.text()
@@ -1547,7 +1534,7 @@ def test_grant_matches_requested_schema_and_previewed_origin(wallet, preview):
                                            modifiers={'dp': [[[requested, '/', []]]]})
         ipexing.prepare(app.vault, holder, request, atc)
         offer, atc = native_ipexing.offer(issuer, '',
-            ipexing._offer_previews({first.said: first.sad})[0] if preview else first_proof,
+            ipexing._offer_preview(first.sad) if preview else first_proof,
             artifacts=[] if preview else None, apply=request)
         ipexing.prepare(app.vault, issuer, offer, atc)
         agree, atc = native_ipexing.agree(holder, '', offer)
@@ -1585,7 +1572,7 @@ def test_offer_review_accepts_reference_and_metadata(wallet, metadata):
     issuer, holder = app.hby.makeHab(name='issuer'), app.hby.makeHab(name='holder')
     acdc, proof, _ = issue(app, issuer, holder.pre, authentication='anchor')
     origin = acdcmap(israid=issuer.pre, uuid='', schema=acdc.schema,
-                     attribute=ipexing._offer_previews({acdc.said: acdc.sad})[0].sad['a']) if metadata else proof
+                     attribute=ipexing._offer_preview(acdc.sad).sad['a']) if metadata else proof
     offer, atc = native_ipexing.offer(issuer, '', origin, recp=holder.pre,
                                     artifacts=[] if metadata else None,
                                     modifiers={'dp': [[[acdc.schema, '/', []]]]})
